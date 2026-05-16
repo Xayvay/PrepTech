@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   getApiKey,
@@ -53,10 +54,26 @@ export default function HomePage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-12">
       <header className="mb-10">
-        <h1 className="text-3xl font-semibold tracking-tight">PrepTech</h1>
+        <div className="flex items-start justify-between gap-4">
+          <h1 className="text-3xl font-semibold tracking-tight">PrepTech</h1>
+          <Link
+            href="/demo"
+            className="rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-1.5 text-xs text-amber-200 hover:bg-amber-950/50"
+          >
+            See the demo →
+          </Link>
+        </div>
         <p className="mt-2 text-zinc-400">
           Tell it the role and company. It builds you a tailored study plan, drills you with graded questions, and
           helps you iterate until you can answer them cleanly.
+        </p>
+        <p className="mt-2 text-xs text-zinc-500">
+          What you&apos;re looking at is the MVP. The full vision — real Reddit-sourced questions, code execution,
+          mastery tracking — is in <code className="font-mono">PLAN.md</code> and previewable at{" "}
+          <Link href="/demo" className="underline hover:text-zinc-300">
+            /demo
+          </Link>
+          .
         </p>
       </header>
 

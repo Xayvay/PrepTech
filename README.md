@@ -4,6 +4,8 @@ Tell it the role and the company. It builds a tailored study plan, drills you wi
 
 Built with Next.js (App Router), the Claude API, and Claude's web search tool — so prep is grounded in real, current info about the company instead of stale training-data guesses.
 
+> **Status:** this branch is the MVP. The full product vision — real questions from Reddit + open repos, code execution against test cases, mastery tracking, company-specific behavioral prep — is documented in [`PLAN.md`](./PLAN.md). A static preview of the target UX lives at [`/demo`](./app/demo/page.tsx) (run the app and visit `/demo`).
+
 ## How it works
 
 1. Enter the role and company.
