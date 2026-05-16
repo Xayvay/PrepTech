@@ -33,6 +33,15 @@ The MVP proves the BYOK + web-search pattern works. It is **not** the foundation
 
 ## Target architecture
 
+### Languages
+
+User picks their preferred coding language; it persists across sessions in their profile. Supported in v1:
+
+- **Python** (Claude `code_execution` tool, zero infra)
+- **Java, C++, Go, JavaScript, TypeScript, Ruby, Rust** (Judge0)
+
+The same question definition stores starter code and test harness per language. Behavioral / system design questions are language-agnostic. Spoken language for interviews is English-only in v1 (multilingual UI / non-English interview prep is post-launch).
+
 ### Stack
 
 | Layer | Choice | Why |
@@ -40,8 +49,10 @@ The MVP proves the BYOK + web-search pattern works. It is **not** the foundation
 | Frontend | Next.js 15 (keep) | Already scaffolded |
 | Auth | Clerk or Supabase Auth | Drop-in, free tier handles thousands of users |
 | Database | Supabase (Postgres + pgvector) | Free tier real, has vector search built-in, auth bundled |
-| LLM | Anthropic Claude | Grading, behavioral feedback, question normalization |
+| LLM | Anthropic Claude | Grading, behavioral feedback, question normalization, delivery analysis |
 | Code execution | Claude `code_execution` tool (Python) + Judge0 (everything else) | Zero infra for Python; Judge0 for Java/C++/Go etc. |
+| Speech-to-text | Browser `Web Speech API` (v1) → OpenAI Whisper or Deepgram (v2) | Free in-browser baseline; upgrade for accuracy on technical terms |
+| Audio capture | Browser `MediaRecorder` API | Native, no library |
 | Ingestion jobs | Supabase Edge Functions (cron) or GitHub Actions | Free, no separate worker infra |
 | Editor | Monaco (lazy-loaded only on coding questions) | Same as VS Code, full syntax highlight |
 
@@ -134,17 +145,36 @@ Affiliate links if you want a small revenue stream that doesn't compromise the p
 - Short answer with LLM grading
 - Mastery tracking + heatmap
 
-### Phase 3 — Coding (week 3–4)
+### Phase 3 — Coding + think-aloud (week 3–4)
 - Monaco editor integration
 - Claude `code_execution` for Python
 - Judge0 for Java/C++/Go/JS
 - Test case runner with pass/fail UI
 - Claude code review on top of pass/fail (complexity, edge cases, style)
+- **Think-aloud mode**: mic stays open during coding; transcript captured continuously alongside code edits. AI grades the *reasoning process*, not just the final code:
+  - Did you **clarify the problem** before coding (constraints, input shape, ambiguous cases)?
+  - Did you **state your approach + complexity** before writing?
+  - Did you **walk edge cases out loud** before they bit you?
+  - Did you **narrate while coding** ("I'm using a hash map because lookups are O(1)") vs. silent typing?
+  - Did you **trace through with an example** after writing?
+  - Did you **discuss tradeoffs and improvements** unprompted?
+  - **Silence ratio** — how much of the session was dead air? Long silences read as stuck.
+  - **Reasoning ↔ code alignment** — did your spoken plan match what you actually wrote?
+- This is the v1 differentiator: every other tool grades the *code*; PrepTech grades the *signal interviewers actually score on*.
 
-### Phase 4 — Behavioral + company-specific (week 4–5)
+### Phase 4 — Behavioral + voice + delivery grading (week 4–5)
 - Company leadership principles / values DB (Amazon LPs, Meta tenets, etc.)
 - Behavioral question bank tagged by principle
 - Long-form answer grading against the principle the question is testing
+- **Voice mode**: record audio answer via `MediaRecorder` API, transcribe via Web Speech API (v1) or Whisper (v2)
+- **Delivery analysis** — Claude grades the *transcript + audio metadata* on:
+  - **STAR structure** — did you cover Situation, Task, Action, Result?
+  - **Filler words** — count + density of "um", "uh", "like", "you know", "kind of"
+  - **Pacing** — words per minute (target 130–160; too slow = unsure, too fast = anxious)
+  - **Confidence markers** — hedging language ("I think maybe", "sort of"), passive vs. active voice
+  - **Length** — behavioral target 90–120s, short or long both flagged
+  - **Specificity** — did you quantify the outcome? "error rate went down" is weak; "error rate dropped 73%" is what hiring committees write up
+- Side-by-side transcript with filler words highlighted, plus rewritten "model answer" version
 - "Recent company news to weave into your story" sidebar (web search)
 
 ### Phase 5 — Polish + launch (week 5–6)
@@ -154,7 +184,8 @@ Affiliate links if you want a small revenue stream that doesn't compromise the p
 - Soft launch on r/cscareerquestions, HN
 
 ### Out of scope for v1
-- Voice / mock interview mode (Exponent owns this; revisit later)
+- Full mock interview mode with live voice back-and-forth from Claude (just one-way voice from candidate in v1; two-way conversational AI interviewer comes in v2)
+- Webcam / body language analysis (legitimately hard, mixed ROI, privacy-heavy)
 - Mobile app
 - Negotiation prep / comp data (requires levels.fyi-style data, paywalled)
 - Multi-language UI
