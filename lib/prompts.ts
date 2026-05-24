@@ -32,7 +32,7 @@ export function systemPrompt(session: Pick<Session, "role" | "company" | "langua
     "Use the web_search tool to ground your prep in current, real information: the company's recent news, engineering blog, products, tech stack, leadership, and reported interview themes for this role. When recommending resources in grades, search for a real, current article/video/talk and include the actual URL. Never invent links.",
     "When building a curriculum, ALSO search for the specific interview-round FORMATS this company uses for this role — pair programming, take-home, code review, system design, behavioral panel, live coding session, etc. — and their distinctive setup (duration, tooling, language constraints, what they grade). When a round has a distinctive format, dedicate a curriculum item specifically to preparing for it and name the format in the item title (e.g., 'Pair Programming (75 min, VS Code Live Share, Swift)' rather than just 'Coding'). The candidate should know what they're walking into.",
     "Be concrete and specific to this role+company. Avoid generic advice. Prefer evidence from real sources over assumptions.",
-    "When asked to ask a question, ask exactly one focused question — technical, behavioral, or role-specific — that someone interviewing for this role at this company might realistically face. Do not answer it yourself. Phrase questions as the CONCRETE SCENARIO an interviewer would actually present — make the candidate identify the underlying concept themselves. Do NOT label the concept in the question. Example for a threading topic: ask 'You have a network call returning user data, and you need to update a UI label with it — walk me through how you'd do this without crashing' rather than 'How do you handle multithreading in Swift?' The only exception is when the topic itself is an explicit knowledge check (e.g., a 'fundamentals' or 'definitions' topic), in which case a direct question is appropriate.",
+    "When asked to ask a question, ask exactly one focused question — technical, behavioral, or role-specific — that someone interviewing for this role at this company might realistically face. Do not answer it yourself. Phrase questions as the CONCRETE SCENARIO an interviewer would present — the candidate has to identify the underlying concept themselves. Do NOT start the question with 'Explain' or 'Describe' or 'What is X' unless the curriculum item title explicitly contains 'fundamentals', 'definitions', or 'concepts' (which is rare; this exception is narrow). Even for comparison questions, prefer scenario framing: ask 'You're refactoring a service that uses completion handlers for every network call — walk me through what you'd change and why' rather than 'Explain the difference between async/await and completion handlers.' Do NOT name the candidate's already-specified language in the question text — they know what they're working in from the session context. Only name a language when it's intrinsic to the question (e.g., comparing two languages, or referencing a feature only one has).",
     [
       "When asked to grade an answer, return ONLY a JSON object (no prose outside it, no code fence) with this shape:",
       "{",
@@ -93,7 +93,7 @@ export function questionMessages(session: Session, focusedTopic?: string): ApiMe
 }
 
 const BANK_SIZE = 6;
-export const BANK_SCHEMA_VERSION = 2;
+export const BANK_SCHEMA_VERSION = 3;
 
 export function questionBankMessages(
   session: Pick<Session, "role" | "company">,
@@ -112,10 +112,14 @@ export function questionBankMessages(
       content:
         `Build a bank of ${BANK_SIZE} real interview questions on the topic "${topicTitle}" for someone interviewing for a "${session.role}" role at ${session.company}.\n\n` +
         `Use web_search aggressively: prioritize questions reported by actual candidates (Glassdoor, blind.io, Reddit r/cscareerquestions, r/leetcode, candidate blog posts, ${session.company}'s own engineering blog if they describe their interview process). Avoid inventing generic questions — find what people have actually been asked.\n\n` +
-        `IMPORTANT — Question phrasing: Each question should be a CONCRETE SCENARIO that forces the candidate to identify the underlying concept themselves. Do NOT label the concept in the question. ` +
-        `For a threading topic, ask "You have a network call returning user data, and you need to update a UI label with it. Walk me through how you'd do this without crashing." rather than "How do you handle multithreading?" ` +
-        `For a system-design topic, ask "Design the rate limiter for our API gateway — assume 50k req/sec across 8 services" rather than "Explain rate limiting." ` +
-        `Phrase questions as the interviewer would actually phrase them. The only exception: if "${topicTitle}" is itself a knowledge-check ("Swift fundamentals", "core data structures"), direct definition-style questions are appropriate.\n\n` +
+        `IMPORTANT — Question phrasing rules:\n` +
+        `1. Each question MUST be a CONCRETE SCENARIO that forces the candidate to identify the underlying concept themselves. ` +
+        `Examples: "You have a network call returning user data, and you need to update a UI label with it — walk me through how you'd do this without crashing" (NOT "How do you handle multithreading?"). ` +
+        `"You're refactoring a service that uses completion handlers everywhere — what would you change and why?" (NOT "Explain the difference between async/await and completion handlers"). ` +
+        `"Design the rate limiter for our API gateway, assume 50k req/sec across 8 services" (NOT "Explain rate limiting").\n` +
+        `2. Do NOT begin a question with "Explain", "Describe", or "What is X" UNLESS the topic title "${topicTitle}" explicitly contains the words "fundamentals", "definitions", or "concepts". This exception is narrow.\n` +
+        `3. Do NOT name the candidate's language in the question text — their language preference is already in the session context, including it is redundant. Only name a language when it's intrinsic to the question (e.g., comparing languages or referencing a language-specific feature without an equivalent elsewhere).\n` +
+        `4. Phrase the question as the interviewer would actually say it in the room.\n\n` +
         `Return ONLY a JSON array (no prose outside it, no code fence) of exactly ${BANK_SIZE} objects with this shape:\n` +
         "[\n" +
         '  {\n' +
