@@ -140,6 +140,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [warmupAnswer, setWarmupAnswer] = useState("");
   const [warmupPhase, setWarmupPhase] = useState<"idle" | "loading" | "answering" | "grading" | "graded">("idle");
   const [warmupLatestGrade, setWarmupLatestGrade] = useState<{ score: number; feedback: string } | null>(null);
+  const [warmupLastSkippedId, setWarmupLastSkippedId] = useState<string | null>(null);
   const [pairTurns, setPairTurns] = useState<PairMessage[]>([]);
   const [pairTopic, setPairTopic] = useState<string | null>(null);
   const [pairBusy, setPairBusy] = useState(false);
@@ -476,7 +477,23 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   function skipWarmup() {
     const skipId = warmupCurrentId;
     if (!skipId) return;
+    setWarmupLastSkippedId(skipId);
     void startWarmup(skipId);
+  }
+
+  function goBackToSkippedWarmup() {
+    if (!session || !warmupLastSkippedId) return;
+    const item = (session.warmups ?? []).find((w) => w.id === warmupLastSkippedId);
+    if (!item) {
+      setWarmupLastSkippedId(null);
+      return;
+    }
+    setWarmupCurrentId(warmupLastSkippedId);
+    setWarmupAnswer("");
+    setWarmupLatestGrade(null);
+    setWarmupLastSkippedId(null);
+    setWarmupPhase("answering");
+    setError(null);
   }
 
   async function submitWarmupAnswer() {
@@ -525,6 +542,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setWarmupCurrentId(null);
     setWarmupAnswer("");
     setWarmupLatestGrade(null);
+    setWarmupLastSkippedId(null);
     setWarmupPhase("idle");
   }
 
@@ -1065,11 +1083,13 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         currentId={warmupCurrentId}
         answer={warmupAnswer}
         latestGrade={warmupLatestGrade}
+        lastSkippedId={warmupLastSkippedId}
         onStart={() => startWarmup()}
         onChangeAnswer={setWarmupAnswer}
         onSubmit={submitWarmupAnswer}
         onNext={() => startWarmup()}
         onSkip={skipWarmup}
+        onBackToSkipped={goBackToSkippedWarmup}
         onEnd={endWarmup}
         onFillTeach={fillTeachForWarmup}
         onOpenCheatSheet={openCheatSheet}
@@ -2237,11 +2257,13 @@ function WarmupPanel({
   currentId,
   answer,
   latestGrade,
+  lastSkippedId,
   onStart,
   onChangeAnswer,
   onSubmit,
   onNext,
   onSkip,
+  onBackToSkipped,
   onEnd,
   onFillTeach,
   onOpenCheatSheet,
@@ -2251,11 +2273,13 @@ function WarmupPanel({
   currentId: string | null;
   answer: string;
   latestGrade: { score: number; feedback: string } | null;
+  lastSkippedId: string | null;
   onStart: () => void;
   onChangeAnswer: (v: string) => void;
   onSubmit: () => void;
   onNext: () => void;
   onSkip: () => void;
+  onBackToSkipped: () => void;
   onEnd: () => void;
   onFillTeach: (itemId: string) => Promise<boolean>;
   onOpenCheatSheet: (filterTopic?: string, filterConcept?: string) => void;
@@ -2332,6 +2356,16 @@ function WarmupPanel({
             className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
           />
           <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
+            {lastSkippedId && lastSkippedId !== currentId && (
+              <button
+                onClick={onBackToSkipped}
+                disabled={phase === "grading"}
+                className="rounded-md border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-amber-200 hover:bg-amber-950/60 disabled:opacity-50"
+                title="Return to the warm-up you just skipped"
+              >
+                ← Back
+              </button>
+            )}
             <button
               onClick={onEnd}
               disabled={phase === "grading"}
@@ -2343,7 +2377,7 @@ function WarmupPanel({
               onClick={onSkip}
               disabled={phase === "grading"}
               className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-              title="Skip this warm-up without recording an attempt"
+              title="Skip — comes back later, you can also click Back to return"
             >
               Skip →
             </button>
@@ -2463,14 +2497,17 @@ function TodayPanel({
   const { day, total } = dayOfPlan(session);
   const stats = masteryStats(session, curriculum.items);
   const [skipped, setSkipped] = useState<string[]>([]);
+  const [forcedTitle, setForcedTitle] = useState<string | null>(null);
   const skippedNorm = skipped.map((s) => s.trim().toLowerCase());
   const filteredItems = curriculum.items.filter(
     (it) => !skippedNorm.includes(it.title.trim().toLowerCase()),
   );
-  const rec: Recommendation = recommendNextTopic(
-    session,
-    filteredItems.length > 0 ? filteredItems : curriculum.items,
-  );
+  const forcedItem = forcedTitle
+    ? curriculum.items.find((it) => it.title === forcedTitle) ?? null
+    : null;
+  const rec: Recommendation = forcedItem
+    ? { kind: "next", item: forcedItem }
+    : recommendNextTopic(session, filteredItems.length > 0 ? filteredItems : curriculum.items);
 
   if (rec.kind === "all_done") {
     return (
@@ -2508,7 +2545,20 @@ function TodayPanel({
       {rec.kind === "revisit" && (
         <div className="mt-1 text-xs text-zinc-500">Last score: {rec.lastScore}/10 — try again with fresh eyes.</div>
       )}
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
+        {skipped.length > 0 && (
+          <button
+            onClick={() => {
+              const last = skipped[skipped.length - 1];
+              setSkipped((prev) => prev.slice(0, -1));
+              setForcedTitle(last);
+            }}
+            className="rounded-md border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200 hover:bg-amber-950/60"
+            title="Return to the previously-shown suggestion"
+          >
+            ← Back
+          </button>
+        )}
         <button
           onClick={() => onStart(rec.item)}
           className="flex-1 rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 hover:bg-emerald-400"
@@ -2516,7 +2566,10 @@ function TodayPanel({
           Start today&apos;s drill →
         </button>
         <button
-          onClick={() => setSkipped((prev) => [...prev, rec.item.title])}
+          onClick={() => {
+            setSkipped((prev) => [...prev, rec.item.title]);
+            setForcedTitle(null);
+          }}
           className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
           title="Suggest a different topic"
         >
