@@ -113,6 +113,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [mode, setMode] = useState<Mode>("transcript");
   const [cheatSheetOpen, setCheatSheetOpen] = useState(false);
   const [cheatSheetFilter, setCheatSheetFilter] = useState<string | null>(null);
+  const [cheatSheetConcept, setCheatSheetConcept] = useState<string | null>(null);
   const [cheatSheetLoading, setCheatSheetLoading] = useState(false);
   const [wasSpoken, setWasSpoken] = useState(false);
   const autoBuildFired = useRef(false);
@@ -219,6 +220,57 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setPhase("answering");
   }
 
+  function redoQuestion(questionTurn: Turn) {
+    if (!session || questionTurn.kind !== "question") return;
+    const topicTitle = questionTurn.topic;
+
+    let isCoding = false;
+    if (topicTitle) {
+      const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
+      const parsed = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
+      const item = parsed?.items.find(
+        (it) => it.title.trim().toLowerCase() === topicTitle.trim().toLowerCase(),
+      );
+      isCoding = item ? isCodingTopic(item) : false;
+    }
+
+    const idx = session.turns.findIndex((t) => t.id === questionTurn.id);
+    const subsequent = idx === -1 ? [] : session.turns.slice(idx + 1);
+    const hasAnswerOrGrade = subsequent.some((t) => t.kind === "answer" || t.kind === "grade");
+    const isLatestQuestion = !subsequent.some((t) => t.kind === "question");
+
+    if (!hasAnswerOrGrade && isLatestQuestion) {
+      // Resume — never answered, no later question came after. Just enter drilling.
+      setFocusedTopic(topicTitle ? { title: topicTitle, isCoding } : null);
+      setMode("drilling");
+      setAnswer("");
+      setWasSpoken(false);
+      setError(null);
+      setPhase("answering");
+      return;
+    }
+
+    // Clone for a fresh attempt.
+    const cloned: Turn = {
+      id: crypto.randomUUID(),
+      role: questionTurn.role,
+      content: questionTurn.content,
+      kind: "question",
+      topic: questionTurn.topic,
+      source: questionTurn.source,
+      concept_tags: questionTurn.concept_tags,
+      createdAt: Date.now(),
+    };
+
+    commit({ ...session, turns: [...session.turns, cloned] });
+    setFocusedTopic(topicTitle ? { title: topicTitle, isCoding } : null);
+    setMode("drilling");
+    setAnswer("");
+    setWasSpoken(false);
+    setError(null);
+    setPhase("answering");
+  }
+
   function saveCheatSheetNote(entryId: string, note: string) {
     if (!session?.cheatSheet) return;
     const trimmed = note.trim();
@@ -258,9 +310,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  async function openCheatSheet(filterTopic?: string) {
+  async function openCheatSheet(filterTopic?: string, filterConcept?: string) {
     if (!session) return;
     setCheatSheetFilter(filterTopic ?? null);
+    setCheatSheetConcept(filterConcept ?? null);
     setCheatSheetOpen(true);
     if (session.cheatSheet && session.cheatSheet.length > 0) return;
     await buildCheatSheetForSession();
@@ -398,9 +451,9 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
                   {lastQuestion.concept_tags.map((tag, i) => (
                     <button
                       key={i}
-                      onClick={() => openCheatSheet(lastQuestion.topic ?? focusedTopic?.title)}
+                      onClick={() => openCheatSheet(lastQuestion.topic ?? focusedTopic?.title, tag)}
                       className="rounded-full border border-sky-900/60 bg-sky-950/40 px-2 py-0.5 text-sky-200 hover:bg-sky-950/70"
-                      title="Open cheat sheet"
+                      title={`Open cheat sheet at ${tag}`}
                     >
                       {tag}
                     </button>
@@ -473,6 +526,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         loading={cheatSheetLoading}
         entries={session.cheatSheet}
         filterTopic={cheatSheetFilter}
+        filterConcept={cheatSheetConcept}
         onClose={() => setCheatSheetOpen(false)}
         onRebuild={rebuildCheatSheet}
         onSaveNote={saveCheatSheetNote}
@@ -520,7 +574,13 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
 
       <div className="space-y-4">
         {session.turns.map((t) => (
-          <TurnView key={t.id} turn={t} session={session} onDrillTopic={drillTopic} />
+          <TurnView
+            key={t.id}
+            turn={t}
+            session={session}
+            onDrillTopic={drillTopic}
+            onRedoQuestion={redoQuestion}
+          />
         ))}
       </div>
 
@@ -589,6 +649,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       loading={cheatSheetLoading}
       entries={session.cheatSheet}
       filterTopic={cheatSheetFilter}
+      filterConcept={cheatSheetConcept}
       onClose={() => setCheatSheetOpen(false)}
       onRebuild={rebuildCheatSheet}
       onSaveNote={saveCheatSheetNote}
@@ -694,10 +755,12 @@ function TurnView({
   turn,
   session,
   onDrillTopic,
+  onRedoQuestion,
 }: {
   turn: Turn;
   session: Session;
   onDrillTopic: (item: CurriculumItem) => void;
+  onRedoQuestion: (turn: Turn) => void;
 }) {
   const label = turn.kind ?? (turn.role === "user" ? "you" : "assistant");
   const tone =
@@ -741,6 +804,48 @@ function TurnView({
         <pre className="overflow-x-auto rounded-md bg-zinc-950 px-3 py-2 font-mono text-xs leading-relaxed text-zinc-200">
           {turn.content.replace(/^```[a-zA-Z0-9_+-]*\n?/, "").replace(/\n?```$/, "")}
         </pre>
+      </div>
+    );
+  }
+
+  if (turn.kind === "question") {
+    const idx = session.turns.findIndex((t) => t.id === turn.id);
+    const subsequent = idx === -1 ? [] : session.turns.slice(idx + 1);
+    const hasAnswerOrGrade = subsequent.some((t) => t.kind === "answer" || t.kind === "grade");
+    const isLatestQuestion = !subsequent.some((t) => t.kind === "question");
+    const willResume = !hasAnswerOrGrade && isLatestQuestion;
+    return (
+      <div className={`rounded-lg border ${tone} p-4`}>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="text-xs uppercase tracking-wide text-amber-400">question</span>
+          {turn.topic && (
+            <button
+              onClick={() => onRedoQuestion(turn)}
+              className="rounded-md border border-amber-700/60 bg-amber-950/60 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-950/80"
+              title={willResume ? "Continue this unfinished question" : "Drill this question again"}
+            >
+              {willResume ? "Continue this question →" : "Drill again →"}
+            </button>
+          )}
+        </div>
+        <div className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">{turn.content}</div>
+        {turn.source && (
+          <div className="mt-2 text-[11px] text-zinc-500">
+            Source:{" "}
+            {turn.source.url ? (
+              <a
+                href={turn.source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+              >
+                {turn.source.description} ↗
+              </a>
+            ) : (
+              <span className="text-zinc-400">{turn.source.description}</span>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -866,6 +971,7 @@ function CheatSheetDrawer({
   loading,
   entries,
   filterTopic,
+  filterConcept,
   onClose,
   onRebuild,
   onSaveNote,
@@ -874,10 +980,13 @@ function CheatSheetDrawer({
   loading: boolean;
   entries: CheatSheetEntry[] | undefined;
   filterTopic: string | null;
+  filterConcept: string | null;
   onClose: () => void;
   onRebuild: () => void;
   onSaveNote: (entryId: string, note: string) => void;
 }) {
+  const entryRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -886,6 +995,45 @@ function CheatSheetDrawer({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  const matchedEntryId = useMemo(() => {
+    if (!filterConcept || !entries || entries.length === 0) return null;
+    const fc = filterConcept.trim().toLowerCase();
+    const tn = filterTopic?.trim().toLowerCase();
+    const fcEsc = fc.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const fcLeading = new RegExp(`^${fcEsc}(?:\\W|$)`, "i");
+
+    function exactMatch(e: CheatSheetEntry) {
+      return e.concept.trim().toLowerCase() === fc;
+    }
+    function leadingMatch(e: CheatSheetEntry) {
+      const cn = e.concept.trim().toLowerCase();
+      if (fcLeading.test(cn)) return true;
+      const cnEsc = cn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const cnLeading = new RegExp(`^${cnEsc}(?:\\W|$)`, "i");
+      return cnLeading.test(fc);
+    }
+
+    const inTopic = (e: CheatSheetEntry) => !tn || e.topic.trim().toLowerCase() === tn;
+
+    return (
+      entries.find((e) => inTopic(e) && exactMatch(e))?.id ??
+      entries.find((e) => inTopic(e) && leadingMatch(e))?.id ??
+      entries.find((e) => exactMatch(e))?.id ??
+      entries.find((e) => leadingMatch(e))?.id ??
+      null
+    );
+  }, [filterConcept, filterTopic, entries]);
+
+  useEffect(() => {
+    if (!open || !matchedEntryId) return;
+    const el = entryRefs.current.get(matchedEntryId);
+    if (el) {
+      requestAnimationFrame(() => {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }, [open, matchedEntryId, entries]);
 
   if (!open) return null;
 
@@ -917,7 +1065,12 @@ function CheatSheetDrawer({
           <div>
             <h2 className="text-sm font-semibold text-zinc-100">Cheat sheet</h2>
             {filterTopic && (
-              <div className="mt-0.5 text-xs text-zinc-500">Focused on: {filterTopic}</div>
+              <div className="mt-0.5 text-xs text-zinc-500">
+                Focused on: {filterTopic}
+                {filterConcept && (
+                  <span className="text-sky-300"> · {filterConcept}</span>
+                )}
+              </div>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -964,7 +1117,13 @@ function CheatSheetDrawer({
                     </h3>
                     <div className="space-y-3">
                       {grouped[topic].map((e) => (
-                        <CheatSheetEntryView key={e.id} entry={e} onSaveNote={onSaveNote} />
+                        <CheatSheetEntryView
+                          key={e.id}
+                          entry={e}
+                          onSaveNote={onSaveNote}
+                          highlighted={e.id === matchedEntryId}
+                          registerRef={(el) => entryRefs.current.set(e.id, el)}
+                        />
                       ))}
                     </div>
                   </section>
@@ -981,9 +1140,13 @@ function CheatSheetDrawer({
 function CheatSheetEntryView({
   entry,
   onSaveNote,
+  highlighted,
+  registerRef,
 }: {
   entry: CheatSheetEntry;
   onSaveNote: (entryId: string, note: string) => void;
+  highlighted?: boolean;
+  registerRef?: (el: HTMLDivElement | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draftNote, setDraftNote] = useState(entry.user_note ?? "");
@@ -998,7 +1161,14 @@ function CheatSheetEntryView({
   }
 
   return (
-    <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+    <div
+      ref={registerRef}
+      className={`rounded-md border p-3 transition ${
+        highlighted
+          ? "border-sky-500 bg-sky-950/30 ring-2 ring-sky-500/40"
+          : "border-zinc-800 bg-zinc-900/40"
+      }`}
+    >
       <div className="mb-1 flex items-baseline gap-2">
         <span className="font-mono text-sm font-semibold text-zinc-100">{entry.concept}</span>
         {entry.language && (
