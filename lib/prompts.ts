@@ -442,10 +442,15 @@ const WARMUP_BATCH_SIZE = 6;
 export function warmupBuildMessages(
   session: Pick<Session, "role" | "company" | "languages">,
   alreadySeen: string[],
+  curriculumTopics: string[],
 ): ApiMessage[] {
   const seenBlock =
     alreadySeen.length > 0
       ? `\n\nAlready seen — do NOT repeat:\n${alreadySeen.slice(-30).map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+      : "";
+  const topicsBlock =
+    curriculumTopics.length > 0
+      ? `\n\nCurriculum topics (assign each warm-up to the best-matching one, or "General" if it's a pure language/domain fundamental that doesn't map to a topic): ${curriculumTopics.join(" / ")}`
       : "";
   return [
     {
@@ -457,14 +462,16 @@ export function warmupBuildMessages(
         `These are short MUST-KNOW fundamentals — designed to drill muscle memory in 30-90 seconds each. NOT interview scenarios. Think: what every senior in this language/domain should answer instantly. Mix of:\n` +
         `- 2 syntax/API questions ("what does X do", "write the syntax for Y")\n` +
         `- 2 concept questions ("when do you use A vs B", "why does X have to be Y")\n` +
-        `- 2 gotcha questions ("what's wrong with this code", "what's the most common mistake with X")\n\n` +
-        `Return ONLY a JSON array (no prose outside, no code fence) of ${WARMUP_BATCH_SIZE} objects:\n` +
+        `- 2 gotcha questions ("what's wrong with this code", "what's the most common mistake with X")\n` +
+        topicsBlock +
+        `\n\nReturn ONLY a JSON array (no prose outside, no code fence) of ${WARMUP_BATCH_SIZE} objects:\n` +
         "[\n" +
         '  {\n' +
         '    "content": "<question text, short and concrete>",\n' +
         '    "expected_signal": "<what a correct answer MUST mention to get >= 8 — be specific, 1-2 sentences>",\n' +
         '    "kind": "syntax" | "concept" | "gotcha",\n' +
         '    "language": "<lowercase language e.g. swift, python, typescript — or empty string if language-agnostic>",\n' +
+        '    "topic": "<exact curriculum topic title from the list above, or \\"General\\" if no good fit>",\n' +
         '    "teach": {\n' +
         '      "why_it_matters": "<1 sentence on the practical impact / why a senior MUST know this — concrete consequence of getting it wrong>",\n' +
         '      "how_to_use": "<1-2 sentences on WHEN you reach for this and HOW — not theory, mechanics>",\n' +
@@ -493,6 +500,7 @@ export type RawWarmupItem = {
   expected_signal: string;
   kind: "syntax" | "concept" | "gotcha";
   language?: string;
+  topic?: string;
   teach?: RawWarmupTeach;
 };
 
@@ -529,8 +537,10 @@ export function parseWarmupBatch(text: string): RawWarmupItem[] | null {
       const language = typeof r.language === "string" && r.language.trim().length > 0
         ? r.language.trim().toLowerCase()
         : undefined;
+      const topic =
+        typeof r.topic === "string" && r.topic.trim().length > 0 ? r.topic.trim() : undefined;
       const teach = coerceWarmupTeach(r.teach);
-      out.push({ content, expected_signal, kind, language, teach });
+      out.push({ content, expected_signal, kind, language, topic, teach });
     }
     return out.length > 0 ? out : null;
   } catch {
@@ -559,7 +569,12 @@ export function warmupGradeMessages(
 export function warmupTeachMessages(
   session: Pick<Session, "role" | "company" | "languages">,
   item: { content: string; expected_signal: string; kind: string; language?: string },
+  curriculumTopics: string[],
 ): ApiMessage[] {
+  const topicsBlock =
+    curriculumTopics.length > 0
+      ? `\n\nCurriculum topics (pick the best-matching one, or "General" if it's a pure language/domain fundamental that doesn't map to a topic): ${curriculumTopics.join(" / ")}`
+      : "";
   return [
     {
       role: "user",
@@ -570,8 +585,10 @@ export function warmupTeachMessages(
         `Question (${item.kind}): ${item.content}\n` +
         `What a correct answer must mention: ${item.expected_signal}` +
         (item.language ? `\nLanguage: ${item.language}` : "") +
+        topicsBlock +
         `\n\nReturn ONLY a JSON object with this shape:\n` +
         "{\n" +
+        '  "topic": "<curriculum topic title from the list above, or \\"General\\" if no good fit>",\n' +
         '  "why_it_matters": "<1 sentence on the practical impact / why a senior MUST know this>",\n' +
         '  "how_to_use": "<1-2 sentences on WHEN you reach for this and HOW>",\n' +
         '  "syntax": "<canonical code snippet, 3-8 lines>",\n' +
@@ -582,12 +599,26 @@ export function warmupTeachMessages(
   ];
 }
 
-export function parseWarmupTeach(text: string): RawWarmupTeach | null {
+export type ParsedWarmupTeachResult = {
+  teach: RawWarmupTeach;
+  topic?: string;
+};
+
+export function parseWarmupTeach(text: string): ParsedWarmupTeachResult | null {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
   try {
     const raw = JSON.parse(match[0]);
-    return coerceWarmupTeach(raw) ?? null;
+    const teach = coerceWarmupTeach(raw);
+    if (!teach) return null;
+    const topic =
+      raw &&
+      typeof raw === "object" &&
+      typeof (raw as Record<string, unknown>).topic === "string" &&
+      ((raw as Record<string, string>).topic.trim().length ?? 0) > 0
+        ? ((raw as Record<string, string>).topic as string).trim()
+        : undefined;
+    return { teach, topic };
   } catch {
     return null;
   }

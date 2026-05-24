@@ -416,12 +416,15 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     if (!session) return null;
     if (!needsWarmupBatch(session)) return session;
     const alreadySeen = (session.warmups ?? []).map((w) => w.content);
+    const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
+    const parsedCurriculum = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
+    const curriculumTopics = parsedCurriculum?.items.map((it) => it.title) ?? [];
     setWarmupPhase("loading");
     setError(null);
     try {
       const res = await callClaude({
         system: sys,
-        messages: warmupBuildMessages(session, alreadySeen),
+        messages: warmupBuildMessages(session, alreadySeen, curriculumTopics),
         useWebSearch: false,
       });
       const parsed = parseWarmupBatch(res.text);
@@ -437,6 +440,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         expected_signal: p.expected_signal,
         kind: p.kind,
         language: p.language,
+        topic: p.topic,
         teach: p.teach,
         attempts: [],
         createdAt: now,
@@ -452,11 +456,12 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  async function startWarmup() {
+  async function startWarmup(excludeId?: string) {
     if (!session) return;
     const s = await ensureWarmupBatch();
     if (!s) return;
-    const next = nextWarmupItem(s.warmups);
+    const pool = excludeId ? (s.warmups ?? []).filter((w) => w.id !== excludeId) : s.warmups;
+    const next = nextWarmupItem(pool);
     if (!next) {
       setWarmupPhase("idle");
       setWarmupCurrentId(null);
@@ -466,6 +471,12 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setWarmupAnswer("");
     setWarmupLatestGrade(null);
     setWarmupPhase("answering");
+  }
+
+  function skipWarmup() {
+    const skipId = warmupCurrentId;
+    if (!skipId) return;
+    void startWarmup(skipId);
   }
 
   async function submitWarmupAnswer() {
@@ -521,19 +532,23 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     if (!session) return false;
     const item = (session.warmups ?? []).find((w) => w.id === itemId);
     if (!item) return false;
+    const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
+    const parsedCurriculum = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
+    const curriculumTopics = parsedCurriculum?.items.map((it) => it.title) ?? [];
     try {
       const res = await callClaude({
         system: sys,
-        messages: warmupTeachMessages(session, item),
+        messages: warmupTeachMessages(session, item, curriculumTopics),
         useWebSearch: false,
       });
-      const teach = parseWarmupTeach(res.text);
-      if (!teach) {
+      const result = parseWarmupTeach(res.text);
+      if (!result) {
         setError("Could not parse warmup explanation.");
         return false;
       }
+      const { teach, topic } = result;
       const next = (session.warmups ?? []).map((w) =>
-        w.id === itemId ? { ...w, teach } : w,
+        w.id === itemId ? { ...w, teach, topic: w.topic ?? topic } : w,
       );
       commit({ ...session, warmups: next });
       return true;
@@ -1050,12 +1065,14 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         currentId={warmupCurrentId}
         answer={warmupAnswer}
         latestGrade={warmupLatestGrade}
-        onStart={startWarmup}
+        onStart={() => startWarmup()}
         onChangeAnswer={setWarmupAnswer}
         onSubmit={submitWarmupAnswer}
-        onNext={startWarmup}
+        onNext={() => startWarmup()}
+        onSkip={skipWarmup}
         onEnd={endWarmup}
         onFillTeach={fillTeachForWarmup}
+        onOpenCheatSheet={openCheatSheet}
       />
 
       {(() => {
@@ -1993,6 +2010,7 @@ function CheatSheetEntryView({
   const [askingCoach, setAskingCoach] = useState(false);
   const [coachQuestion, setCoachQuestion] = useState("");
   const [coachBusy, setCoachBusy] = useState(false);
+  const [coachError, setCoachError] = useState<string | null>(null);
   const [fillingGotcha, setFillingGotcha] = useState(false);
 
   useEffect(() => {
@@ -2005,18 +2023,24 @@ function CheatSheetEntryView({
   }
 
   async function submitCoachQuestion() {
-    if (!coachQuestion.trim()) return;
+    const q = coachQuestion.trim();
+    if (!q) return;
     setCoachBusy(true);
+    setCoachError(null);
     try {
-      const answer = await onAskCoach(entry, coachQuestion.trim());
+      const answer = await onAskCoach(entry, q);
+      if (!answer || answer.trim().length === 0) {
+        setCoachError("Empty response from coach. Try again.");
+        return;
+      }
       const prior = entry.user_note ?? "";
-      const block = `**Q:** ${coachQuestion.trim()}\n\n${answer}`;
+      const block = `**Q:** ${q}\n\n${answer.trim()}`;
       const merged = prior.length > 0 ? `${prior}\n\n---\n\n${block}` : block;
       onSaveNote(entry.id, merged);
       setCoachQuestion("");
       setAskingCoach(false);
-    } catch {
-      // error surfaced elsewhere
+    } catch (e) {
+      setCoachError(e instanceof Error ? e.message : "Failed to reach the coach");
     } finally {
       setCoachBusy(false);
     }
@@ -2101,27 +2125,45 @@ function CheatSheetEntryView({
           <textarea
             value={coachQuestion}
             onChange={(e) => setCoachQuestion(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && coachQuestion.trim() && !coachBusy) {
+                e.preventDefault();
+                void submitCoachQuestion();
+              }
+            }}
             rows={2}
             autoFocus
             disabled={coachBusy}
             placeholder="e.g. when would I pick this over async/await? what about cancellation?"
             className="w-full rounded border border-purple-900/50 bg-zinc-950 px-2 py-1 text-[11px] leading-relaxed text-zinc-200 outline-none focus:border-purple-500 disabled:opacity-50"
           />
+          {coachBusy && (
+            <div className="mt-1 text-[10px] text-purple-300">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-purple-400 align-middle" /> coach is answering…
+            </div>
+          )}
+          {coachError && (
+            <div className="mt-1 rounded border border-red-900/50 bg-red-950/40 px-2 py-1 text-[10px] text-red-200">
+              {coachError}
+            </div>
+          )}
           <div className="mt-1 flex justify-end gap-2 text-[10px]">
             <button
               disabled={coachBusy}
               onClick={() => {
                 setAskingCoach(false);
                 setCoachQuestion("");
+                setCoachError(null);
               }}
               className="text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
             >
               cancel
             </button>
             <button
+              type="button"
               disabled={coachBusy || !coachQuestion.trim()}
-              onClick={submitCoachQuestion}
-              className="text-purple-300 hover:text-purple-200 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void submitCoachQuestion()}
+              className="rounded bg-purple-500 px-2 py-0.5 font-medium text-purple-950 hover:bg-purple-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {coachBusy ? "asking…" : "ask"}
             </button>
@@ -2199,8 +2241,10 @@ function WarmupPanel({
   onChangeAnswer,
   onSubmit,
   onNext,
+  onSkip,
   onEnd,
   onFillTeach,
+  onOpenCheatSheet,
 }: {
   session: Session;
   phase: "idle" | "loading" | "answering" | "grading" | "graded";
@@ -2211,8 +2255,10 @@ function WarmupPanel({
   onChangeAnswer: (v: string) => void;
   onSubmit: () => void;
   onNext: () => void;
+  onSkip: () => void;
   onEnd: () => void;
   onFillTeach: (itemId: string) => Promise<boolean>;
+  onOpenCheatSheet: (filterTopic?: string, filterConcept?: string) => void;
 }) {
   const stats = warmupStats(session);
   const current = currentId ? session.warmups?.find((w) => w.id === currentId) ?? null : null;
@@ -2254,12 +2300,21 @@ function WarmupPanel({
 
       {(phase === "answering" || phase === "grading") && current && (
         <div className="mt-3 space-y-2">
-          <div className="flex items-baseline gap-2 text-[11px]">
+          <div className="flex flex-wrap items-baseline gap-2 text-[11px]">
             <span className="rounded bg-indigo-900/60 px-1.5 py-0.5 uppercase tracking-wide text-indigo-200">
               {current.kind}
             </span>
             {current.language && (
               <span className="font-mono text-zinc-500">{current.language}</span>
+            )}
+            {current.topic && (
+              <button
+                onClick={() => onOpenCheatSheet(current.topic === "General" ? undefined : current.topic)}
+                className="rounded-full border border-sky-900/60 bg-sky-950/40 px-2 py-0.5 text-sky-200 hover:bg-sky-950/70"
+                title="Open the cheat sheet for this topic"
+              >
+                📖 {current.topic}
+              </button>
             )}
             {current.attempts.length > 0 && (
               <span className="text-zinc-500">
@@ -2276,13 +2331,21 @@ function WarmupPanel({
             placeholder="Answer in your own words — short is fine."
             className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
           />
-          <div className="flex justify-end gap-2 text-xs">
+          <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
             <button
               onClick={onEnd}
               disabled={phase === "grading"}
               className="rounded-md border border-zinc-800 px-3 py-1 text-zinc-400 hover:bg-zinc-900 disabled:opacity-50"
             >
               Done for now
+            </button>
+            <button
+              onClick={onSkip}
+              disabled={phase === "grading"}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              title="Skip this warm-up without recording an attempt"
+            >
+              Skip →
             </button>
             <button
               onClick={onSubmit}
@@ -2297,6 +2360,15 @@ function WarmupPanel({
 
       {phase === "graded" && current && latestGrade && (
         <div className="mt-3 space-y-2">
+          {current.topic && (
+            <button
+              onClick={() => onOpenCheatSheet(current.topic === "General" ? undefined : current.topic)}
+              className="inline-flex items-center gap-1 rounded-full border border-sky-900/60 bg-sky-950/40 px-2 py-0.5 text-[11px] text-sky-200 hover:bg-sky-950/70"
+              title="Open the cheat sheet for this topic"
+            >
+              📖 {current.topic}
+            </button>
+          )}
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-xs text-zinc-500">{current.content}</span>
             <span
@@ -2390,7 +2462,15 @@ function TodayPanel({
 }) {
   const { day, total } = dayOfPlan(session);
   const stats = masteryStats(session, curriculum.items);
-  const rec: Recommendation = recommendNextTopic(session, curriculum.items);
+  const [skipped, setSkipped] = useState<string[]>([]);
+  const skippedNorm = skipped.map((s) => s.trim().toLowerCase());
+  const filteredItems = curriculum.items.filter(
+    (it) => !skippedNorm.includes(it.title.trim().toLowerCase()),
+  );
+  const rec: Recommendation = recommendNextTopic(
+    session,
+    filteredItems.length > 0 ? filteredItems : curriculum.items,
+  );
 
   if (rec.kind === "all_done") {
     return (
@@ -2428,12 +2508,21 @@ function TodayPanel({
       {rec.kind === "revisit" && (
         <div className="mt-1 text-xs text-zinc-500">Last score: {rec.lastScore}/10 — try again with fresh eyes.</div>
       )}
-      <button
-        onClick={() => onStart(rec.item)}
-        className="mt-3 w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 hover:bg-emerald-400"
-      >
-        Start today&apos;s drill →
-      </button>
+      <div className="mt-3 flex gap-2">
+        <button
+          onClick={() => onStart(rec.item)}
+          className="flex-1 rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 hover:bg-emerald-400"
+        >
+          Start today&apos;s drill →
+        </button>
+        <button
+          onClick={() => setSkipped((prev) => [...prev, rec.item.title])}
+          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          title="Suggest a different topic"
+        >
+          Show another →
+        </button>
+      </div>
     </div>
   );
 }

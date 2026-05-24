@@ -46,6 +46,7 @@ export type WarmupItem = {
   expected_signal: string;
   kind: "syntax" | "concept" | "gotcha";
   language?: string;
+  topic?: string;
   teach?: WarmupTeach;
   attempts: WarmupAttempt[];
   masteredAt?: number;
