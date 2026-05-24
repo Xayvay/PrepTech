@@ -207,6 +207,27 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setMode("transcript");
   }
 
+  function nextTopicAndDrill() {
+    if (!session) return;
+    const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
+    const parsed = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
+    if (!parsed || parsed.items.length === 0) {
+      backToPlan();
+      return;
+    }
+    const currentNorm = focusedTopic?.title.trim().toLowerCase();
+    const remaining = currentNorm
+      ? parsed.items.filter((it) => it.title.trim().toLowerCase() !== currentNorm)
+      : parsed.items;
+    const pool = remaining.length > 0 ? remaining : parsed.items;
+    const rec = recommendNextTopic(session, pool);
+    if (rec.kind === "all_done") {
+      backToPlan();
+      return;
+    }
+    drillTopic(rec.item);
+  }
+
   function tryAgain() {
     if (!session) return;
     const lastAnswer = [...session.turns].reverse().find((t) => t.kind === "answer");
@@ -496,27 +517,35 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
           )}
 
           {phase === "ready-to-ask" && (
-            <div className="flex flex-wrap gap-2">
-              {latestGrade && (
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={nextTopicAndDrill}
+                className="w-full rounded-md bg-emerald-500 px-4 py-2 font-medium text-emerald-950 hover:bg-emerald-400"
+              >
+                Next topic →
+              </button>
+              <div className="flex flex-wrap gap-2 text-sm">
                 <button
-                  onClick={tryAgain}
-                  className="rounded-md border border-amber-700/60 bg-amber-950/40 px-4 py-2 text-sm font-medium text-amber-200 hover:bg-amber-950/60"
+                  onClick={() => nextQuestion()}
+                  className="flex-1 rounded-md border border-sky-900/60 bg-sky-950/40 px-3 py-1.5 text-sky-200 hover:bg-sky-950/60"
                 >
-                  Try this again
+                  Another question on this topic
                 </button>
-              )}
-              <button
-                onClick={() => nextQuestion()}
-                className="flex-1 rounded-md bg-emerald-500 px-4 py-2 font-medium text-emerald-950 hover:bg-emerald-400"
-              >
-                Next question on this topic
-              </button>
-              <button
-                onClick={backToPlan}
-                className="rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
-              >
-                Back to plan
-              </button>
+                {latestGrade && (
+                  <button
+                    onClick={tryAgain}
+                    className="rounded-md border border-amber-700/60 bg-amber-950/40 px-3 py-1.5 text-amber-200 hover:bg-amber-950/60"
+                  >
+                    Try this again
+                  </button>
+                )}
+                <button
+                  onClick={backToPlan}
+                  className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-300 hover:bg-zinc-800"
+                >
+                  Back to plan
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -663,14 +692,21 @@ async function serveFromBank(
   sys: string,
   topicTitle: string,
 ): Promise<{ session: Session }> {
+  const DAY_MS = 24 * 60 * 60 * 1000;
   const banks = session.questionBanks ?? {};
   const seenAll = session.seenQuestions ?? {};
   const bank = banks[topicTitle] ?? [];
   const seenForTopic = seenAll[topicTitle] ?? [];
 
-  const unused = bank.find(
-    (e) => !e.used && (e.schemaVersion ?? 1) >= BANK_SCHEMA_VERSION,
+  const newestCreatedAt = bank.reduce(
+    (acc, e) => Math.max(acc, e.createdAt ?? 0),
+    0,
   );
+  const bankIsStale = bank.length > 0 && Date.now() - newestCreatedAt > DAY_MS;
+
+  const unused = bankIsStale
+    ? undefined
+    : bank.find((e) => !e.used && (e.schemaVersion ?? 1) >= BANK_SCHEMA_VERSION);
 
   if (unused) {
     const t = newTurn("assistant", unused.content, "question", undefined, topicTitle);
@@ -717,6 +753,7 @@ async function serveFromBank(
     };
   }
 
+  const buildTime = Date.now();
   const newEntries: BankEntry[] = parsed.map((p) => ({
     id: crypto.randomUUID(),
     content: p.content,
@@ -724,6 +761,7 @@ async function serveFromBank(
     concept_tags: p.concept_tags,
     schemaVersion: BANK_SCHEMA_VERSION,
     used: false,
+    createdAt: buildTime,
   }));
   const [first, ...rest] = newEntries;
   const firstUsed: BankEntry = { ...first, used: true, usedAt: Date.now() };

@@ -22,6 +22,7 @@ export type BankEntry = {
   schemaVersion?: number;
   used: boolean;
   usedAt?: number;
+  createdAt?: number;
 };
 
 export type CheatSheetEntry = {

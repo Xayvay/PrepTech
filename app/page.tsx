@@ -253,9 +253,27 @@ export default function HomePage() {
         </section>
       )}
 
-      <footer className="mt-10 text-xs text-zinc-600">
-        Built with Next.js · Claude Agent SDK · WebSearch · localStorage. Sessions stay in your browser; prompts go
-        through your local Claude CLI login.
+      <footer className="mt-10 flex items-center justify-between gap-4 text-xs text-zinc-600">
+        <span>
+          Built with Next.js · Claude Agent SDK · WebSearch · localStorage. Sessions stay in your browser; prompts
+          go through your local Claude CLI login.
+        </span>
+        <button
+          onClick={() => {
+            if (
+              confirm(
+                "Wipe all PrepTech data?\n\nThis deletes every session, transcript, score, question bank, cheat sheet, and motivation note stored in this browser. Cannot be undone.",
+              )
+            ) {
+              window.localStorage.clear();
+              window.location.reload();
+            }
+          }}
+          className="shrink-0 rounded-md border border-zinc-800 px-2 py-1 text-zinc-500 hover:border-red-900 hover:text-red-300"
+          title="Wipe all PrepTech data from this browser"
+        >
+          Clear all data
+        </button>
       </footer>
     </main>
   );
