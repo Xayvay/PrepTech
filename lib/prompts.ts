@@ -46,7 +46,8 @@ export function systemPrompt(session: Pick<Session, "role" | "company" | "langua
       '    }',
       '  ],',
       '  "follow_up": "<one sharper follow-up question that targets the biggest gap>",',
-      '  "nudge": "<one sentence that ties this grade back to what the candidate said landing this role would change for them. Specific, not platitudes. Skip if no motivation was provided.>"',
+      '  "nudge": "<one sentence that ties this grade back to what the candidate said landing this role would change for them. Specific, not platitudes. Skip if no motivation was provided.>",',
+      '  "communication": { "score": <0-10>, "notes": "<assessment of their verbal communication if the candidate spoke their answer>" }  // OMIT this field entirely if the grade request did not say the answer was spoken',
       "}",
       "Aim for 1-3 improvements, each with a real searched resource. If you genuinely can't find a credible resource for an item, set resource to null rather than fabricating.",
     ].join("\n"),
@@ -258,17 +259,31 @@ export function isCodingTopic(item: { title: string; body: string }): boolean {
   return CODING_KEYWORDS.some((k) => haystack.includes(k));
 }
 
-export function gradeMessages(session: Session, answer: string): ApiMessage[] {
+export function gradeMessages(
+  session: Session,
+  answer: string,
+  options?: { wasSpoken?: boolean },
+): ApiMessage[] {
   const lastQuestion = [...session.turns].reverse().find((t) => t.kind === "question");
+  const spokenClause = options?.wasSpoken
+    ? [
+        "",
+        "The candidate gave this answer using voice input (speech-to-text), so the wording reflects how they were SPEAKING through the answer in real time — not polished writing. In addition to scoring the content, also evaluate their verbal communication quality: clarity, structure (did they signpost their points?), conciseness (or were they padding/rambling?), filler-word use (um, uh, like, right, you know), and overall whether you'd be impressed listening to them in an interview.",
+        'Include a "communication" field in the grade JSON: { "score": <0-10>, "notes": "<2-3 sentence assessment naming ONE concrete thing to change about how they communicate aloud — not what to add to the content>" }. Score communication generously on structure and concision if the content is solid; do not be a pushover on padding, filler, or wandering.',
+      ].join("\n")
+    : "";
   return [
     {
       role: "user",
       content: [
         `Question: ${lastQuestion?.content ?? "(unknown question)"}`,
         `My answer: ${answer}`,
+        spokenClause,
         "",
-        'Grade my answer. Return ONLY the JSON object: {"score": int 0-10, "feedback": "...", "follow_up": "..."}',
-      ].join("\n"),
+        'Grade my answer per the system prompt schema. Return ONLY the JSON object.',
+      ]
+        .filter((s) => s !== "")
+        .join("\n"),
     },
   ];
 }
@@ -341,6 +356,7 @@ export type Grade = {
   improvements: GradeImprovement[];
   follow_up: string;
   nudge: string;
+  communication?: { score: number; notes: string };
 };
 
 function coerceStringArray(v: unknown): string[] {
@@ -369,6 +385,17 @@ function coerceImprovements(v: unknown): GradeImprovement[] {
     .filter((x): x is GradeImprovement => x !== null);
 }
 
+function coerceCommunication(v: unknown): Grade["communication"] {
+  if (!v || typeof v !== "object") return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.score !== "number") return undefined;
+  const notes = typeof r.notes === "string" ? r.notes.trim() : "";
+  return {
+    score: Math.max(0, Math.min(10, Math.round(r.score))),
+    notes,
+  };
+}
+
 export function parseGrade(text: string): Grade | null {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
@@ -382,6 +409,7 @@ export function parseGrade(text: string): Grade | null {
       improvements: coerceImprovements(obj.improvements),
       follow_up: typeof obj.follow_up === "string" ? obj.follow_up : "",
       nudge: typeof obj.nudge === "string" ? obj.nudge : "",
+      communication: coerceCommunication(obj.communication),
     };
   } catch {
     return null;

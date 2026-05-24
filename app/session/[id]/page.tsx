@@ -114,6 +114,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [cheatSheetOpen, setCheatSheetOpen] = useState(false);
   const [cheatSheetFilter, setCheatSheetFilter] = useState<string | null>(null);
   const [cheatSheetLoading, setCheatSheetLoading] = useState(false);
+  const [wasSpoken, setWasSpoken] = useState(false);
   const autoBuildFired = useRef(false);
 
   useEffect(() => {
@@ -167,6 +168,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     if (!session) return;
     const focus = overrideFocus ?? focusedTopic;
     setError(null);
+    setWasSpoken(false);
     setPhase("loading-question");
     try {
       if (focus) {
@@ -213,6 +215,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       .replace(/\n?```$/, "");
     setAnswer(unfenced);
     setError(null);
+    setWasSpoken(false);
     setPhase("answering");
   }
 
@@ -280,10 +283,11 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     const withAnswer: Session = { ...session, turns: [...session.turns, answerTurn] };
     commit(withAnswer);
 
+    const wasSpokenForThisAnswer = wasSpoken;
     try {
       const res = await callClaude({
         system: sys,
-        messages: gradeMessages(withAnswer, storedAnswer),
+        messages: gradeMessages(withAnswer, storedAnswer, { wasSpoken: wasSpokenForThisAnswer }),
         useWebSearch: true,
       });
       const grade = parseGrade(res.text);
@@ -291,6 +295,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       const nextScores = grade ? [...withAnswer.scores, grade.score] : withAnswer.scores;
       commit({ ...withAnswer, turns: [...withAnswer.turns, t], scores: nextScores });
       setAnswer("");
+      setWasSpoken(false);
       setPhase("ready-to-ask");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
@@ -433,6 +438,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
               onChange={setAnswer}
               onSubmit={submitAnswer}
               codingLanguage={codingLanguage}
+              onSpeechCaptured={() => setWasSpoken(true)}
             />
           )}
 
@@ -1212,6 +1218,31 @@ function GradeView({ grade }: { grade: Grade }) {
         </div>
       )}
 
+      {grade.communication && (() => {
+        const cs = grade.communication.score;
+        const csColor =
+          cs >= 8 ? "text-emerald-300" : cs >= 5 ? "text-amber-300" : "text-red-300";
+        const csBar = cs >= 8 ? "bg-emerald-400" : cs >= 5 ? "bg-amber-400" : "bg-red-400";
+        return (
+          <div className="rounded-md border border-purple-900/50 bg-purple-950/30 px-3 py-2.5">
+            <div className="mb-1 flex items-baseline justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wide text-purple-400">
+                🎙️ How you communicated
+              </div>
+              <span className={`text-sm font-semibold tabular-nums ${csColor}`}>{cs}/10</span>
+            </div>
+            <div className="mb-2 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+              <div className={`h-full ${csBar}`} style={{ width: `${cs * 10}%` }} />
+            </div>
+            {grade.communication.notes && (
+              <div className="text-sm leading-relaxed text-zinc-200">
+                <InlineMarkdown text={grade.communication.notes} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {grade.improvements.length > 0 && (
         <div>
           <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-sky-400">
@@ -1276,21 +1307,133 @@ function AnswerInput({
   onChange,
   onSubmit,
   codingLanguage,
+  onSpeechCaptured,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
   codingLanguage?: string;
+  onSpeechCaptured?: () => void;
 }) {
   const isCoding = !!codingLanguage;
+  const valueRef = useRef(value);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+
+  const [listening, setListening] = useState(false);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const supportsSpeech =
+    typeof window !== "undefined" &&
+    (typeof (window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition !== "undefined" ||
+      typeof (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition !== "undefined");
+
+  useEffect(() => {
+    return () => {
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  function startListening() {
+    if (!supportsSpeech) return;
+    setSpeechError(null);
+    const Ctor =
+      (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionCtor }).webkitSpeechRecognition ??
+      (window as unknown as { SpeechRecognition?: SpeechRecognitionCtor }).SpeechRecognition;
+    if (!Ctor) return;
+    const rec = new Ctor();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+
+    rec.onresult = (event: SpeechRecognitionEventLike) => {
+      let finalText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const r = event.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+      }
+      if (finalText.trim().length > 0) {
+        const current = valueRef.current;
+        const sep = current.length > 0 && !/\s$/.test(current) ? " " : "";
+        onChange(current + sep + finalText.trim());
+        onSpeechCaptured?.();
+      }
+    };
+    rec.onerror = (event: { error?: string }) => {
+      setSpeechError(event.error ? `mic: ${event.error}` : "mic error");
+      setListening(false);
+    };
+    rec.onend = () => {
+      setListening(false);
+    };
+
+    recognitionRef.current = rec;
+    try {
+      rec.start();
+      setListening(true);
+    } catch (e) {
+      setSpeechError(e instanceof Error ? e.message : "could not start mic");
+    }
+  }
+
+  function stopListening() {
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // ignore
+    }
+    setListening(false);
+  }
+
+  const showMic = !isCoding && supportsSpeech;
+
   return (
     <div className="flex flex-col gap-2">
-      {isCoding && (
-        <div className="flex items-center justify-between text-xs">
-          <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-zinc-300">
-            <span className="text-zinc-500">lang:</span> {codingLanguage}
-          </span>
-          <span className="text-zinc-500">Tab inserts spaces · code is fenced before grading</span>
+      {(isCoding || showMic) && (
+        <div className="flex items-center justify-between gap-2 text-xs">
+          {isCoding ? (
+            <>
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-zinc-300">
+                <span className="text-zinc-500">lang:</span> {codingLanguage}
+              </span>
+              <span className="text-zinc-500">Tab inserts spaces · code is fenced before grading</span>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={listening ? stopListening : startListening}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 transition ${
+                  listening
+                    ? "border-red-700 bg-red-950/60 text-red-200"
+                    : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                }`}
+                title={listening ? "Stop listening" : "Talk your answer out — we'll grade communication too"}
+              >
+                {listening ? (
+                  <>
+                    <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-400" />
+                    Listening… click to stop
+                  </>
+                ) : (
+                  <>🎙️ Talk it out</>
+                )}
+              </button>
+              <span className="text-zinc-500">
+                {listening ? "speak naturally; you can also type" : "spoken answers get a communication score too"}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+      {speechError && (
+        <div className="rounded-md border border-red-900 bg-red-950/40 px-2.5 py-1 text-[11px] text-red-200">
+          {speechError}
         </div>
       )}
       <textarea
@@ -1310,14 +1453,23 @@ function AnswerInput({
           }
         }}
         rows={isCoding ? 12 : 4}
-        placeholder={isCoding ? "// type your solution" : "Type your answer. Be specific."}
+        placeholder={
+          isCoding
+            ? "// type your solution"
+            : listening
+              ? "transcribing… you can also type"
+              : "Type your answer — or click 🎙️ to talk it out."
+        }
         className={`w-full resize-y rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 outline-none focus:border-zinc-600 ${
           isCoding ? "font-mono text-xs leading-relaxed" : "text-sm"
         }`}
         spellCheck={!isCoding}
       />
       <button
-        onClick={onSubmit}
+        onClick={() => {
+          if (listening) stopListening();
+          onSubmit();
+        }}
         disabled={!value.trim()}
         className="rounded-md bg-emerald-500 px-4 py-2 font-medium text-emerald-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -1326,6 +1478,25 @@ function AnswerInput({
     </div>
   );
 }
+
+type SpeechRecognitionResultItemLike = { transcript: string };
+type SpeechRecognitionResultLike = ArrayLike<SpeechRecognitionResultItemLike> & { isFinal: boolean };
+type SpeechRecognitionResultsLike = ArrayLike<SpeechRecognitionResultLike>;
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: SpeechRecognitionResultsLike;
+};
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+};
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 
 function InlineMarkdown({ text }: { text: string }) {
   const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|\*\*([^*\n]+)\*\*/g;
