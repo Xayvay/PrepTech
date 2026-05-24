@@ -99,3 +99,41 @@ export function leetcodeUrl(title: string): string {
   const q = encodeURIComponent(title.replace(/[^a-zA-Z0-9 ]+/g, " ").trim());
   return `https://leetcode.com/problemset/?search=${q}`;
 }
+
+const WARMUP_MASTERED_SCORE = 8;
+
+export function isWarmupMastered(item: { attempts: { score: number }[] }): boolean {
+  if (item.attempts.length === 0) return false;
+  const latest = item.attempts[item.attempts.length - 1];
+  return latest.score >= WARMUP_MASTERED_SCORE;
+}
+
+export function warmupStats(session: { warmups?: { attempts: { score: number }[] }[] }): {
+  mastered: number;
+  total: number;
+} {
+  const warmups = session.warmups ?? [];
+  return {
+    mastered: warmups.filter(isWarmupMastered).length,
+    total: warmups.length,
+  };
+}
+
+export function nextWarmupItem<T extends { id: string; attempts: { score: number }[]; createdAt: number }>(
+  warmups: T[] | undefined,
+): T | null {
+  if (!warmups || warmups.length === 0) return null;
+  const unmastered = warmups.filter((w) => !isWarmupMastered(w));
+  if (unmastered.length === 0) return null;
+  const failedBefore = unmastered
+    .filter((w) => w.attempts.length > 0)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (failedBefore.length > 0) return failedBefore[0];
+  return unmastered.sort((a, b) => a.createdAt - b.createdAt)[0];
+}
+
+export function needsWarmupBatch(session: { warmups?: { attempts: { score: number }[] }[] }): boolean {
+  const warmups = session.warmups ?? [];
+  if (warmups.length === 0) return true;
+  return warmups.every(isWarmupMastered);
+}

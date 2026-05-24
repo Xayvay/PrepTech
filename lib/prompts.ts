@@ -437,6 +437,108 @@ export function parseSingleCheatSheetEntry(text: string): RawCheatSheetEntry | n
   }
 }
 
+const WARMUP_BATCH_SIZE = 6;
+
+export function warmupBuildMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  alreadySeen: string[],
+): ApiMessage[] {
+  const seenBlock =
+    alreadySeen.length > 0
+      ? `\n\nAlready seen — do NOT repeat:\n${alreadySeen.slice(-30).map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+      : "";
+  return [
+    {
+      role: "user",
+      content:
+        `Generate ${WARMUP_BATCH_SIZE} foundational warm-up questions for a candidate preparing for a "${session.role}" role` +
+        (session.languages ? ` in ${session.languages}` : "") +
+        ` at ${session.company}.\n\n` +
+        `These are short MUST-KNOW fundamentals — designed to drill muscle memory in 30-90 seconds each. NOT interview scenarios. Think: what every senior in this language/domain should answer instantly. Mix of:\n` +
+        `- 2 syntax/API questions ("what does X do", "write the syntax for Y")\n` +
+        `- 2 concept questions ("when do you use A vs B", "why does X have to be Y")\n` +
+        `- 2 gotcha questions ("what's wrong with this code", "what's the most common mistake with X")\n\n` +
+        `Return ONLY a JSON array (no prose outside, no code fence) of ${WARMUP_BATCH_SIZE} objects:\n` +
+        "[\n" +
+        '  {\n' +
+        '    "content": "<question text, short and concrete>",\n' +
+        '    "expected_signal": "<what a correct answer MUST mention to get >= 8 — be specific, 1-2 sentences>",\n' +
+        '    "kind": "syntax" | "concept" | "gotcha",\n' +
+        '    "language": "<lowercase language e.g. swift, python, typescript — or empty string if language-agnostic>"\n' +
+        "  }\n" +
+        "]" +
+        seenBlock,
+    },
+  ];
+}
+
+export type RawWarmupItem = {
+  content: string;
+  expected_signal: string;
+  kind: "syntax" | "concept" | "gotcha";
+  language?: string;
+};
+
+export function parseWarmupBatch(text: string): RawWarmupItem[] | null {
+  const match = text.match(/\[[\s\S]*\]/);
+  if (!match) return null;
+  try {
+    const arr = JSON.parse(match[0]);
+    if (!Array.isArray(arr)) return null;
+    const out: RawWarmupItem[] = [];
+    for (const raw of arr) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      const content = typeof r.content === "string" ? r.content.trim() : "";
+      const expected_signal = typeof r.expected_signal === "string" ? r.expected_signal.trim() : "";
+      const kind = r.kind === "syntax" || r.kind === "concept" || r.kind === "gotcha" ? r.kind : null;
+      if (!content || !expected_signal || !kind) continue;
+      const language = typeof r.language === "string" && r.language.trim().length > 0
+        ? r.language.trim().toLowerCase()
+        : undefined;
+      out.push({ content, expected_signal, kind, language });
+    }
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+export function warmupGradeMessages(
+  session: Pick<Session, "role" | "company">,
+  item: { content: string; expected_signal: string; kind: string },
+  answer: string,
+): ApiMessage[] {
+  return [
+    {
+      role: "user",
+      content:
+        `Grade this warm-up answer. Be brief, strict, and fair.\n\n` +
+        `Question (${item.kind}): ${item.content}\n` +
+        `What a correct answer must mention: ${item.expected_signal}\n\n` +
+        `Candidate's answer: ${answer}\n\n` +
+        `Return ONLY a JSON object: { "score": <integer 0-10>, "feedback": "<one short sentence — what they got right or what's missing>" }. No prose outside.`,
+    },
+  ];
+}
+
+export type WarmupGrade = { score: number; feedback: string };
+
+export function parseWarmupGrade(text: string): WarmupGrade | null {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const obj = JSON.parse(match[0]);
+    if (typeof obj.score !== "number") return null;
+    return {
+      score: Math.max(0, Math.min(10, Math.round(obj.score))),
+      feedback: typeof obj.feedback === "string" ? obj.feedback.trim() : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function cheatSheetAskCoachMessages(
   session: Pick<Session, "role" | "company" | "languages">,
   entry: { concept: string; when_to_use: string; syntax: string; language?: string; topic: string },

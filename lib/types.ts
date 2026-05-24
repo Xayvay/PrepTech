@@ -25,6 +25,24 @@ export type BankEntry = {
   createdAt?: number;
 };
 
+export type WarmupAttempt = {
+  score: number;
+  answer: string;
+  feedback?: string;
+  at: number;
+};
+
+export type WarmupItem = {
+  id: string;
+  content: string;
+  expected_signal: string;
+  kind: "syntax" | "concept" | "gotcha";
+  language?: string;
+  attempts: WarmupAttempt[];
+  masteredAt?: number;
+  createdAt: number;
+};
+
 export type CheatSheetEntry = {
   id: string;
   topic: string;
@@ -52,6 +70,7 @@ export type Session = {
   questionBanks?: Record<string, BankEntry[]>;
   seenQuestions?: Record<string, string[]>;
   cheatSheet?: CheatSheetEntry[];
+  warmups?: WarmupItem[];
 };
 
 export type ApiMessage = {

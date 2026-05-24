@@ -81,6 +81,10 @@ import {
   parseSingleCheatSheetEntry,
   fillGotchaMessages,
   parseGotcha,
+  warmupBuildMessages,
+  parseWarmupBatch,
+  warmupGradeMessages,
+  parseWarmupGrade,
   gradeMessages,
   parseGrade,
   parseCurriculum,
@@ -100,10 +104,13 @@ import {
   masteryStats,
   dayOfPlan,
   leetcodeUrl,
+  nextWarmupItem,
+  warmupStats,
+  needsWarmupBatch,
   type Mastery,
   type Recommendation,
 } from "@/lib/mastery";
-import type { BankEntry, CheatSheetEntry, Session, Turn } from "@/lib/types";
+import type { BankEntry, CheatSheetEntry, Session, Turn, WarmupItem } from "@/lib/types";
 
 type FocusedTopic = { title: string; isCoding: boolean };
 
@@ -127,6 +134,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [cheatSheetConcept, setCheatSheetConcept] = useState<string | null>(null);
   const [cheatSheetLoading, setCheatSheetLoading] = useState(false);
   const [wasSpoken, setWasSpoken] = useState(false);
+  const [warmupCurrentId, setWarmupCurrentId] = useState<string | null>(null);
+  const [warmupAnswer, setWarmupAnswer] = useState("");
+  const [warmupPhase, setWarmupPhase] = useState<"idle" | "loading" | "answering" | "grading" | "graded">("idle");
+  const [warmupLatestGrade, setWarmupLatestGrade] = useState<{ score: number; feedback: string } | null>(null);
   const [pairTurns, setPairTurns] = useState<PairMessage[]>([]);
   const [pairTopic, setPairTopic] = useState<string | null>(null);
   const [pairBusy, setPairBusy] = useState(false);
@@ -392,6 +403,115 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       return;
     }
     drillTopic(rec.item);
+  }
+
+  function cancelLoading() {
+    setPhase("ready-to-ask");
+    setError(null);
+  }
+
+  async function ensureWarmupBatch(): Promise<Session | null> {
+    if (!session) return null;
+    if (!needsWarmupBatch(session)) return session;
+    const alreadySeen = (session.warmups ?? []).map((w) => w.content);
+    setWarmupPhase("loading");
+    setError(null);
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: warmupBuildMessages(session, alreadySeen),
+        useWebSearch: false,
+      });
+      const parsed = parseWarmupBatch(res.text);
+      if (!parsed) {
+        setError("Could not parse warm-up batch. Try again.");
+        setWarmupPhase("idle");
+        return null;
+      }
+      const now = Date.now();
+      const newItems: WarmupItem[] = parsed.map((p) => ({
+        id: crypto.randomUUID(),
+        content: p.content,
+        expected_signal: p.expected_signal,
+        kind: p.kind,
+        language: p.language,
+        attempts: [],
+        createdAt: now,
+      }));
+      const merged = [...(session.warmups ?? []), ...newItems];
+      const updated: Session = { ...session, warmups: merged };
+      commit(updated);
+      return updated;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to build warm-up batch");
+      setWarmupPhase("idle");
+      return null;
+    }
+  }
+
+  async function startWarmup() {
+    if (!session) return;
+    const s = await ensureWarmupBatch();
+    if (!s) return;
+    const next = nextWarmupItem(s.warmups);
+    if (!next) {
+      setWarmupPhase("idle");
+      setWarmupCurrentId(null);
+      return;
+    }
+    setWarmupCurrentId(next.id);
+    setWarmupAnswer("");
+    setWarmupLatestGrade(null);
+    setWarmupPhase("answering");
+  }
+
+  async function submitWarmupAnswer() {
+    if (!session || !warmupCurrentId || !warmupAnswer.trim()) return;
+    const item = (session.warmups ?? []).find((w) => w.id === warmupCurrentId);
+    if (!item) return;
+    setWarmupPhase("grading");
+    setError(null);
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: warmupGradeMessages(session, item, warmupAnswer.trim()),
+        useWebSearch: false,
+      });
+      const grade = parseWarmupGrade(res.text);
+      if (!grade) {
+        setError("Could not parse warm-up grade.");
+        setWarmupPhase("answering");
+        return;
+      }
+      const attempt = {
+        score: grade.score,
+        answer: warmupAnswer.trim(),
+        feedback: grade.feedback,
+        at: Date.now(),
+      };
+      const next = (session.warmups ?? []).map((w) => {
+        if (w.id !== warmupCurrentId) return w;
+        const nextAttempts = [...w.attempts, attempt];
+        return {
+          ...w,
+          attempts: nextAttempts,
+          masteredAt: grade.score >= 8 ? Date.now() : w.masteredAt,
+        };
+      });
+      commit({ ...session, warmups: next });
+      setWarmupLatestGrade(grade);
+      setWarmupPhase("graded");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to grade warm-up");
+      setWarmupPhase("answering");
+    }
+  }
+
+  function endWarmup() {
+    setWarmupCurrentId(null);
+    setWarmupAnswer("");
+    setWarmupLatestGrade(null);
+    setWarmupPhase("idle");
   }
 
   function tryAgain() {
@@ -782,9 +902,19 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
           )}
 
           {phase === "loading-question" && (
-            <PhaseStatus label="Pulling a question grounded in current sources…" />
+            <ElapsedPhaseStatus
+              label="Pulling a question grounded in current sources…"
+              slowAfterSec={30}
+              onCancel={cancelLoading}
+            />
           )}
-          {phase === "grading" && <PhaseStatus label="Grading your answer (searching for resources)…" />}
+          {phase === "grading" && (
+            <ElapsedPhaseStatus
+              label="Grading your answer (searching for resources)…"
+              slowAfterSec={30}
+              onCancel={cancelLoading}
+            />
+          )}
 
           {phase === "ready-to-ask" && latestGrade && (
             <div className="rounded-lg border border-emerald-900 bg-emerald-950/30 p-4">
@@ -885,6 +1015,19 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         </div>
       </div>
 
+      <WarmupPanel
+        session={session}
+        phase={warmupPhase}
+        currentId={warmupCurrentId}
+        answer={warmupAnswer}
+        latestGrade={warmupLatestGrade}
+        onStart={startWarmup}
+        onChangeAnswer={setWarmupAnswer}
+        onSubmit={submitWarmupAnswer}
+        onNext={startWarmup}
+        onEnd={endWarmup}
+      />
+
       {(() => {
         const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
         const parsed = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
@@ -893,18 +1036,43 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       })()}
 
       <div className="space-y-4">
-        {session.turns.map((t) => (
-          <TurnView
-            key={t.id}
-            turn={t}
-            session={session}
-            onDrillTopic={drillTopic}
-            onPairProgram={startPairProgramming}
-            onRedoQuestion={redoQuestion}
-            onDiscardQuestion={discardQuestion}
-          />
-        ))}
+        {session.turns
+          .filter((t) => t.kind === "curriculum")
+          .map((t) => (
+            <TurnView
+              key={t.id}
+              turn={t}
+              session={session}
+              onDrillTopic={drillTopic}
+              onPairProgram={startPairProgramming}
+              onRedoQuestion={redoQuestion}
+              onDiscardQuestion={discardQuestion}
+            />
+          ))}
       </div>
+
+      {(() => {
+        const drills = groupTurnsByDrill(session.turns);
+        if (drills.length === 0) return null;
+        return (
+          <section className="mt-6">
+            <h2 className="mb-3 flex items-baseline justify-between text-xs font-semibold uppercase tracking-wide text-zinc-400">
+              <span>Your answers</span>
+              <span className="text-zinc-600">{drills.length} drilled</span>
+            </h2>
+            <div className="space-y-3">
+              {[...drills].reverse().map((drill) => (
+                <DrillCard
+                  key={drill.questionTurn.id}
+                  drill={drill}
+                  onRedoQuestion={redoQuestion}
+                  onDiscardQuestion={discardQuestion}
+                />
+              ))}
+            </div>
+          </section>
+        );
+      })()}
 
       <div className="sticky bottom-0 mt-6 -mx-6 border-t border-zinc-800 bg-zinc-950/95 px-6 py-4 backdrop-blur">
         {error && (
@@ -1078,6 +1246,220 @@ function PhaseStatus({ label }: { label: string }) {
     <div className="flex items-center gap-2 text-sm text-zinc-400">
       <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
       {label}
+    </div>
+  );
+}
+
+function ElapsedPhaseStatus({
+  label,
+  slowAfterSec = 30,
+  onCancel,
+}: {
+  label: string;
+  slowAfterSec?: number;
+  onCancel?: () => void;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const interval = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(interval);
+  }, []);
+  const isSlow = elapsed >= slowAfterSec;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 text-sm text-zinc-400">
+        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+        {label}
+        <span className="tabular-nums text-zinc-500">· {elapsed}s</span>
+      </div>
+      {isSlow && (
+        <div className="flex items-center gap-3 text-xs text-zinc-500">
+          <span>
+            Still working — fresh bank rebuilds can take 60–180s with web search.
+          </span>
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              className="rounded border border-zinc-800 px-2 py-0.5 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+            >
+              Cancel & retry
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type DrillGroup = {
+  questionTurn: Turn;
+  answerTurn: Turn | null;
+  gradeTurn: Turn | null;
+};
+
+function groupTurnsByDrill(turns: Turn[]): DrillGroup[] {
+  const groups: DrillGroup[] = [];
+  for (const turn of turns) {
+    if (turn.kind === "question") {
+      groups.push({ questionTurn: turn, answerTurn: null, gradeTurn: null });
+      continue;
+    }
+    const current = groups[groups.length - 1];
+    if (!current) continue;
+    if (turn.kind === "answer" && !current.answerTurn) current.answerTurn = turn;
+    else if (turn.kind === "grade" && !current.gradeTurn) current.gradeTurn = turn;
+  }
+  return groups;
+}
+
+function DrillCard({
+  drill,
+  onRedoQuestion,
+  onDiscardQuestion,
+}: {
+  drill: DrillGroup;
+  onRedoQuestion: (turn: Turn) => void;
+  onDiscardQuestion: (turn: Turn) => void;
+}) {
+  const { questionTurn, answerTurn, gradeTurn } = drill;
+  const hasAnswer = !!answerTurn;
+  const hasGrade = !!gradeTurn;
+  const grade = gradeTurn ? parseGrade(gradeTurn.content) : null;
+  const score = grade?.score ?? gradeTurn?.score;
+
+  const [expanded, setExpanded] = useState(!hasGrade);
+
+  const scoreColor =
+    score === undefined
+      ? "text-zinc-500"
+      : score >= 8
+        ? "text-emerald-300"
+        : score >= 5
+          ? "text-amber-300"
+          : "text-red-300";
+  const borderTone = hasGrade
+    ? score !== undefined && score >= 8
+      ? "border-emerald-900/60"
+      : score !== undefined && score >= 5
+        ? "border-amber-900/60"
+        : "border-red-900/60"
+    : "border-amber-900/40";
+
+  const answerContent = answerTurn?.content ?? "";
+  const isCodedAnswer = answerContent.startsWith("```");
+  const unfencedAnswer = isCodedAnswer
+    ? answerContent.replace(/^```[a-zA-Z0-9_+-]*\n?/, "").replace(/\n?```$/, "")
+    : answerContent;
+
+  return (
+    <div className={`rounded-lg border ${borderTone} bg-zinc-950/40`}>
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2.5">
+        <div className="flex flex-1 items-center gap-2 text-xs">
+          {questionTurn.topic ? (
+            <span className="text-zinc-300">{questionTurn.topic}</span>
+          ) : (
+            <span className="text-zinc-500">untagged</span>
+          )}
+          <span className="text-zinc-600">·</span>
+          {hasGrade && score !== undefined ? (
+            <span className={`font-semibold tabular-nums ${scoreColor}`}>{score}/10</span>
+          ) : hasAnswer ? (
+            <span className="text-zinc-500">graded? unparsed</span>
+          ) : (
+            <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">
+              unanswered
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onRedoQuestion(questionTurn)}
+            className="rounded-md border border-amber-700/60 bg-amber-950/60 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-950/80"
+            title={hasAnswer ? "Drill this question again" : "Continue this unfinished question"}
+          >
+            {hasAnswer ? "Drill again →" : "Continue →"}
+          </button>
+          {!hasAnswer && (
+            <button
+              onClick={() => onDiscardQuestion(questionTurn)}
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              title="Discard this unanswered question"
+            >
+              ✕
+            </button>
+          )}
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+            aria-label={expanded ? "Collapse" : "Expand"}
+          >
+            {expanded ? "−" : "+"}
+          </button>
+        </div>
+      </header>
+
+      <div className="px-4 py-3">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-400">Question</div>
+        <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-100">
+          {questionTurn.content}
+        </div>
+        {questionTurn.source && (
+          <div className="mt-1.5 text-[11px] text-zinc-500">
+            Source:{" "}
+            {questionTurn.source.url ? (
+              <a
+                href={questionTurn.source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+              >
+                {questionTurn.source.description} ↗
+              </a>
+            ) : (
+              <span className="text-zinc-400">{questionTurn.source.description}</span>
+            )}
+          </div>
+        )}
+        {questionTurn.concept_tags && questionTurn.concept_tags.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="text-zinc-500">Tags:</span>
+            {questionTurn.concept_tags.map((tag, i) => (
+              <span
+                key={i}
+                className="rounded-full border border-sky-900/60 bg-sky-950/40 px-2 py-0.5 text-sky-200"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {expanded && hasAnswer && (
+        <div className="border-t border-zinc-800 px-4 py-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">Your answer</div>
+          {isCodedAnswer ? (
+            <pre className="mt-1 overflow-x-auto rounded-md bg-zinc-950 px-3 py-2 font-mono text-xs leading-relaxed text-zinc-200">
+              {unfencedAnswer}
+            </pre>
+          ) : (
+            <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">{unfencedAnswer}</div>
+          )}
+        </div>
+      )}
+
+      {expanded && grade && (
+        <div className="border-t border-zinc-800 px-4 py-3">
+          <GradeView grade={grade} />
+        </div>
+      )}
+
+      {expanded && hasGrade && !grade && gradeTurn && (
+        <div className="border-t border-zinc-800 px-4 py-3 text-sm whitespace-pre-wrap text-zinc-300">
+          {gradeTurn.content}
+        </div>
+      )}
     </div>
   );
 }
@@ -1774,6 +2156,153 @@ function MasteryDot({ mastery }: { mastery: Mastery }) {
       title={label}
       aria-label={label}
     />
+  );
+}
+
+function WarmupPanel({
+  session,
+  phase,
+  currentId,
+  answer,
+  latestGrade,
+  onStart,
+  onChangeAnswer,
+  onSubmit,
+  onNext,
+  onEnd,
+}: {
+  session: Session;
+  phase: "idle" | "loading" | "answering" | "grading" | "graded";
+  currentId: string | null;
+  answer: string;
+  latestGrade: { score: number; feedback: string } | null;
+  onStart: () => void;
+  onChangeAnswer: (v: string) => void;
+  onSubmit: () => void;
+  onNext: () => void;
+  onEnd: () => void;
+}) {
+  const stats = warmupStats(session);
+  const current = currentId ? session.warmups?.find((w) => w.id === currentId) ?? null : null;
+
+  return (
+    <section className="mb-4 rounded-lg border border-indigo-900/60 bg-indigo-950/30 p-4">
+      <header className="flex items-center justify-between gap-2 text-xs">
+        <span className="font-semibold uppercase tracking-wide text-indigo-300">🔥 Warm-up</span>
+        <span className="text-zinc-400">
+          <span className="font-semibold text-zinc-200">{stats.mastered}</span>
+          <span className="text-zinc-600"> / {stats.total}</span> fundamentals mastered
+        </span>
+      </header>
+
+      {phase === "idle" && (
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <p className="text-xs text-zinc-400">
+            {stats.total === 0
+              ? "Drill quick fundamentals to keep your language muscle memory sharp."
+              : stats.mastered === stats.total
+                ? "You've mastered every warm-up so far. Build a fresh set?"
+                : "Pick up where you left off — unmastered items come back until you nail them."}
+          </p>
+          <button
+            onClick={onStart}
+            className="shrink-0 rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-indigo-950 hover:bg-indigo-400"
+          >
+            {stats.total === 0 ? "Start warm-up →" : stats.mastered === stats.total ? "Get more →" : "Next warm-up →"}
+          </button>
+        </div>
+      )}
+
+      {phase === "loading" && (
+        <div className="mt-3">
+          <PhaseStatus label="Building warm-up batch…" />
+        </div>
+      )}
+
+      {(phase === "answering" || phase === "grading") && current && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-baseline gap-2 text-[11px]">
+            <span className="rounded bg-indigo-900/60 px-1.5 py-0.5 uppercase tracking-wide text-indigo-200">
+              {current.kind}
+            </span>
+            {current.language && (
+              <span className="font-mono text-zinc-500">{current.language}</span>
+            )}
+            {current.attempts.length > 0 && (
+              <span className="text-zinc-500">
+                attempt {current.attempts.length + 1} · last score {current.attempts[current.attempts.length - 1].score}/10
+              </span>
+            )}
+          </div>
+          <div className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-100">{current.content}</div>
+          <textarea
+            value={answer}
+            onChange={(e) => onChangeAnswer(e.target.value)}
+            disabled={phase === "grading"}
+            rows={3}
+            placeholder="Answer in your own words — short is fine."
+            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
+          />
+          <div className="flex justify-end gap-2 text-xs">
+            <button
+              onClick={onEnd}
+              disabled={phase === "grading"}
+              className="rounded-md border border-zinc-800 px-3 py-1 text-zinc-400 hover:bg-zinc-900 disabled:opacity-50"
+            >
+              Done for now
+            </button>
+            <button
+              onClick={onSubmit}
+              disabled={phase === "grading" || !answer.trim()}
+              className="rounded-md bg-indigo-500 px-3 py-1 font-medium text-indigo-950 hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {phase === "grading" ? "Grading…" : "Submit"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === "graded" && current && latestGrade && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs text-zinc-500">{current.content}</span>
+            <span
+              className={`text-sm font-semibold tabular-nums ${
+                latestGrade.score >= 8 ? "text-emerald-300" : latestGrade.score >= 5 ? "text-amber-300" : "text-red-300"
+              }`}
+            >
+              {latestGrade.score}/10
+            </span>
+          </div>
+          {latestGrade.feedback && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs leading-relaxed text-zinc-200">
+              {latestGrade.feedback}
+            </div>
+          )}
+          {latestGrade.score >= 8 ? (
+            <div className="text-[11px] text-emerald-400">Mastered — this won&apos;t come back unless you regenerate.</div>
+          ) : (
+            <div className="text-[11px] text-amber-400">
+              This will come back next time you warm up — drill until you nail it.
+            </div>
+          )}
+          <div className="flex justify-end gap-2 text-xs">
+            <button
+              onClick={onEnd}
+              className="rounded-md border border-zinc-800 px-3 py-1 text-zinc-400 hover:bg-zinc-900"
+            >
+              Done for now
+            </button>
+            <button
+              onClick={onNext}
+              className="rounded-md bg-indigo-500 px-3 py-1 font-medium text-indigo-950 hover:bg-indigo-400"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
