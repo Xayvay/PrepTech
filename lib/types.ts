@@ -32,12 +32,21 @@ export type WarmupAttempt = {
   at: number;
 };
 
+export type WarmupTeach = {
+  why_it_matters: string;
+  how_to_use: string;
+  syntax: string;
+  language?: string;
+  gotcha?: string;
+};
+
 export type WarmupItem = {
   id: string;
   content: string;
   expected_signal: string;
   kind: "syntax" | "concept" | "gotcha";
   language?: string;
+  teach?: WarmupTeach;
   attempts: WarmupAttempt[];
   masteredAt?: number;
   createdAt: number;

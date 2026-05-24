@@ -464,20 +464,53 @@ export function warmupBuildMessages(
         '    "content": "<question text, short and concrete>",\n' +
         '    "expected_signal": "<what a correct answer MUST mention to get >= 8 — be specific, 1-2 sentences>",\n' +
         '    "kind": "syntax" | "concept" | "gotcha",\n' +
-        '    "language": "<lowercase language e.g. swift, python, typescript — or empty string if language-agnostic>"\n' +
+        '    "language": "<lowercase language e.g. swift, python, typescript — or empty string if language-agnostic>",\n' +
+        '    "teach": {\n' +
+        '      "why_it_matters": "<1 sentence on the practical impact / why a senior MUST know this — concrete consequence of getting it wrong>",\n' +
+        '      "how_to_use": "<1-2 sentences on WHEN you reach for this and HOW — not theory, mechanics>",\n' +
+        '      "syntax": "<canonical code snippet, 3-8 lines, what you would actually write in production>",\n' +
+        '      "language": "<lowercase language hint matching the snippet>",\n' +
+        '      "gotcha": "<optional, the single most common mistake — omit field if there isn\'t a clear one>"\n' +
+        '    }\n' +
         "  }\n" +
-        "]" +
+        "]\n\n" +
+        `The teach block is what the candidate sees AFTER they answer — make it the explanation a senior would give a junior in 10 seconds. Concrete, not academic.` +
         seenBlock,
     },
   ];
 }
+
+export type RawWarmupTeach = {
+  why_it_matters: string;
+  how_to_use: string;
+  syntax: string;
+  language?: string;
+  gotcha?: string;
+};
 
 export type RawWarmupItem = {
   content: string;
   expected_signal: string;
   kind: "syntax" | "concept" | "gotcha";
   language?: string;
+  teach?: RawWarmupTeach;
 };
+
+function coerceWarmupTeach(v: unknown): RawWarmupTeach | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const t = v as Record<string, unknown>;
+  const why_it_matters = typeof t.why_it_matters === "string" ? t.why_it_matters.trim() : "";
+  const how_to_use = typeof t.how_to_use === "string" ? t.how_to_use.trim() : "";
+  const syntax = typeof t.syntax === "string" ? t.syntax : "";
+  if (!why_it_matters || !how_to_use || !syntax) return undefined;
+  const language =
+    typeof t.language === "string" && t.language.trim().length > 0
+      ? t.language.trim().toLowerCase()
+      : undefined;
+  const gotcha =
+    typeof t.gotcha === "string" && t.gotcha.trim().length > 0 ? t.gotcha.trim() : undefined;
+  return { why_it_matters, how_to_use, syntax, language, gotcha };
+}
 
 export function parseWarmupBatch(text: string): RawWarmupItem[] | null {
   const match = text.match(/\[[\s\S]*\]/);
@@ -496,7 +529,8 @@ export function parseWarmupBatch(text: string): RawWarmupItem[] | null {
       const language = typeof r.language === "string" && r.language.trim().length > 0
         ? r.language.trim().toLowerCase()
         : undefined;
-      out.push({ content, expected_signal, kind, language });
+      const teach = coerceWarmupTeach(r.teach);
+      out.push({ content, expected_signal, kind, language, teach });
     }
     return out.length > 0 ? out : null;
   } catch {

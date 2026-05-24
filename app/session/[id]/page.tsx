@@ -435,6 +435,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         expected_signal: p.expected_signal,
         kind: p.kind,
         language: p.language,
+        teach: p.teach,
         attempts: [],
         createdAt: now,
       }));
@@ -2279,6 +2280,32 @@ function WarmupPanel({
               {latestGrade.feedback}
             </div>
           )}
+
+          {current.teach && (
+            <div className="space-y-2 rounded-md border border-indigo-900/60 bg-zinc-950/60 px-3 py-2.5">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-indigo-300">
+                Reference
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wide text-zinc-500">Why it matters</div>
+                <div className="text-xs leading-relaxed text-zinc-200">{current.teach.why_it_matters}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wide text-zinc-500">How to use it</div>
+                <div className="text-xs leading-relaxed text-zinc-200">{current.teach.how_to_use}</div>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">Syntax</div>
+                <CodeBlock code={current.teach.syntax} language={current.teach.language ?? current.language} />
+              </div>
+              {current.teach.gotcha && (
+                <div className="text-[11px] italic leading-relaxed text-amber-300/90">
+                  <span className="font-semibold not-italic text-amber-400">Gotcha:</span> {current.teach.gotcha}
+                </div>
+              )}
+            </div>
+          )}
+
           {latestGrade.score >= 8 ? (
             <div className="text-[11px] text-emerald-400">Mastered — this won&apos;t come back unless you regenerate.</div>
           ) : (
