@@ -85,6 +85,8 @@ import {
   parseWarmupBatch,
   warmupGradeMessages,
   parseWarmupGrade,
+  warmupTeachMessages,
+  parseWarmupTeach,
   gradeMessages,
   parseGrade,
   parseCurriculum,
@@ -513,6 +515,32 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setWarmupAnswer("");
     setWarmupLatestGrade(null);
     setWarmupPhase("idle");
+  }
+
+  async function fillTeachForWarmup(itemId: string): Promise<boolean> {
+    if (!session) return false;
+    const item = (session.warmups ?? []).find((w) => w.id === itemId);
+    if (!item) return false;
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: warmupTeachMessages(session, item),
+        useWebSearch: false,
+      });
+      const teach = parseWarmupTeach(res.text);
+      if (!teach) {
+        setError("Could not parse warmup explanation.");
+        return false;
+      }
+      const next = (session.warmups ?? []).map((w) =>
+        w.id === itemId ? { ...w, teach } : w,
+      );
+      commit({ ...session, warmups: next });
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to fetch explanation");
+      return false;
+    }
   }
 
   function tryAgain() {
@@ -1027,6 +1055,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         onSubmit={submitWarmupAnswer}
         onNext={startWarmup}
         onEnd={endWarmup}
+        onFillTeach={fillTeachForWarmup}
       />
 
       {(() => {
@@ -2171,6 +2200,7 @@ function WarmupPanel({
   onSubmit,
   onNext,
   onEnd,
+  onFillTeach,
 }: {
   session: Session;
   phase: "idle" | "loading" | "answering" | "grading" | "graded";
@@ -2182,9 +2212,11 @@ function WarmupPanel({
   onSubmit: () => void;
   onNext: () => void;
   onEnd: () => void;
+  onFillTeach: (itemId: string) => Promise<boolean>;
 }) {
   const stats = warmupStats(session);
   const current = currentId ? session.warmups?.find((w) => w.id === currentId) ?? null : null;
+  const [fillingTeach, setFillingTeach] = useState(false);
 
   return (
     <section className="mb-4 rounded-lg border border-indigo-900/60 bg-indigo-950/30 p-4">
@@ -2279,6 +2311,20 @@ function WarmupPanel({
             <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs leading-relaxed text-zinc-200">
               {latestGrade.feedback}
             </div>
+          )}
+
+          {!current.teach && (
+            <button
+              disabled={fillingTeach}
+              onClick={async () => {
+                setFillingTeach(true);
+                await onFillTeach(current.id);
+                setFillingTeach(false);
+              }}
+              className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+            >
+              {fillingTeach ? "fetching explanation…" : "+ Get the explanation (why this matters + syntax)"}
+            </button>
           )}
 
           {current.teach && (

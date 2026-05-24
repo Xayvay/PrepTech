@@ -556,6 +556,43 @@ export function warmupGradeMessages(
   ];
 }
 
+export function warmupTeachMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  item: { content: string; expected_signal: string; kind: string; language?: string },
+): ApiMessage[] {
+  return [
+    {
+      role: "user",
+      content:
+        `For a candidate preparing for a "${session.role}" role at ${session.company}` +
+        (session.languages ? ` (language: ${session.languages})` : "") +
+        `, write the reference card a senior would give a junior in 10 seconds for this warm-up:\n\n` +
+        `Question (${item.kind}): ${item.content}\n` +
+        `What a correct answer must mention: ${item.expected_signal}` +
+        (item.language ? `\nLanguage: ${item.language}` : "") +
+        `\n\nReturn ONLY a JSON object with this shape:\n` +
+        "{\n" +
+        '  "why_it_matters": "<1 sentence on the practical impact / why a senior MUST know this>",\n' +
+        '  "how_to_use": "<1-2 sentences on WHEN you reach for this and HOW>",\n' +
+        '  "syntax": "<canonical code snippet, 3-8 lines>",\n' +
+        '  "language": "<lowercase language hint matching the snippet>",\n' +
+        '  "gotcha": "<optional, the single most common mistake — omit field if none>"\n' +
+        "}",
+    },
+  ];
+}
+
+export function parseWarmupTeach(text: string): RawWarmupTeach | null {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[0]);
+    return coerceWarmupTeach(raw) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export type WarmupGrade = { score: number; feedback: string };
 
 export function parseWarmupGrade(text: string): WarmupGrade | null {
