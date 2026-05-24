@@ -2,22 +2,8 @@
 
 import type { Session, Turn } from "./types";
 
-const KEY_API = "preptech.apiKey";
 const KEY_SESSIONS = "preptech.sessions";
 const KEY_ACTIVE = "preptech.activeSessionId";
-
-export function getApiKey(): string {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(KEY_API) ?? "";
-}
-
-export function setApiKey(k: string) {
-  window.localStorage.setItem(KEY_API, k);
-}
-
-export function clearApiKey() {
-  window.localStorage.removeItem(KEY_API);
-}
 
 export function listSessions(): Session[] {
   if (typeof window === "undefined") return [];
@@ -60,11 +46,22 @@ export function setActiveSessionId(id: string) {
   window.localStorage.setItem(KEY_ACTIVE, id);
 }
 
-export function newSession(role: string, company: string): Session {
+export function newSession(
+  role: string,
+  company: string,
+  extras?: Pick<Session, "languages" | "interviewTypes" | "seniority" | "motivation" | "notes">,
+): Session {
   return {
     id: crypto.randomUUID(),
     role,
     company,
+    ...(extras?.languages ? { languages: extras.languages } : {}),
+    ...(extras?.interviewTypes && extras.interviewTypes.length > 0
+      ? { interviewTypes: extras.interviewTypes }
+      : {}),
+    ...(extras?.seniority ? { seniority: extras.seniority } : {}),
+    ...(extras?.motivation ? { motivation: extras.motivation } : {}),
+    ...(extras?.notes ? { notes: extras.notes } : {}),
     createdAt: Date.now(),
     updatedAt: Date.now(),
     turns: [],
@@ -72,13 +69,20 @@ export function newSession(role: string, company: string): Session {
   };
 }
 
-export function newTurn(role: Turn["role"], content: string, kind?: Turn["kind"], score?: number): Turn {
+export function newTurn(
+  role: Turn["role"],
+  content: string,
+  kind?: Turn["kind"],
+  score?: number,
+  topic?: string,
+): Turn {
   return {
     id: crypto.randomUUID(),
     role,
     content,
     kind,
     score,
+    topic,
     createdAt: Date.now(),
   };
 }

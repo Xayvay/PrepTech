@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
+import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ApiRequest, ApiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -7,12 +7,23 @@ export const dynamic = "force-dynamic";
 
 const MODEL = "claude-sonnet-4-5";
 
-export async function POST(req: NextRequest) {
-  const apiKey = req.headers.get("x-anthropic-key");
-  if (!apiKey) {
-    return NextResponse.json({ error: "Missing x-anthropic-key header" }, { status: 401 });
-  }
+function flattenHistory(messages: ApiRequest["messages"]): string {
+  if (messages.length === 1) return messages[0].content;
+  const prior = messages.slice(0, -1);
+  const last = messages[messages.length - 1];
+  const transcript = prior
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n\n");
+  return [
+    "Conversation so far:",
+    transcript,
+    "",
+    "Current request:",
+    last.content,
+  ].join("\n");
+}
 
+export async function POST(req: NextRequest) {
   let body: ApiRequest;
   try {
     body = (await req.json()) as ApiRequest;
@@ -25,50 +36,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing system or messages" }, { status: 400 });
   }
 
-  const client = new Anthropic({ apiKey });
+  // Strip ANTHROPIC_API_KEY so the SDK uses the local `claude` OAuth login
+  // (Max subscription) instead of falling back to API-key billing.
+  const subprocessEnv: Record<string, string | undefined> = { ...process.env };
+  delete subprocessEnv.ANTHROPIC_API_KEY;
+  delete subprocessEnv.ANTHROPIC_AUTH_TOKEN;
 
-  const tools = useWebSearch
-    ? [
-        {
-          type: "web_search_20250305" as const,
-          name: "web_search",
-          max_uses: 5,
-        },
-      ]
-    : undefined;
+  const options: Options = {
+    systemPrompt: system,
+    model: MODEL,
+    tools: useWebSearch ? ["WebSearch"] : [],
+    allowedTools: useWebSearch ? ["WebSearch"] : [],
+    permissionMode: "bypassPermissions",
+    maxTurns: useWebSearch ? 8 : 2,
+    env: subprocessEnv,
+  };
 
   try {
-    const result = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      system,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      // @ts-expect-error — server-side web_search tool is accepted by the API
-      tools,
-    });
-
-    const text = result.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-
-    const citations: { url: string; title?: string }[] = [];
-    for (const block of result.content) {
-      // @ts-expect-error — citation shape on text blocks from web search
-      const c = block.citations as Array<{ url?: string; title?: string }> | undefined;
-      if (Array.isArray(c)) {
-        for (const cit of c) {
-          if (cit.url) citations.push({ url: cit.url, title: cit.title });
-        }
+    const q = query({ prompt: flattenHistory(messages), options });
+    let finalText = "";
+    for await (const msg of q) {
+      if (msg.type === "result" && msg.subtype === "success") {
+        finalText = msg.result;
+        break;
       }
     }
-
-    const response: ApiResponse = { text, citations: citations.length ? citations : undefined };
+    if (!finalText) {
+      return NextResponse.json({ error: "No response from model" }, { status: 502 });
+    }
+    const response: ApiResponse = { text: finalText.trim() };
     return NextResponse.json(response);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    const status = typeof (err as { status?: number })?.status === "number" ? (err as { status: number }).status : 500;
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

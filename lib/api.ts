@@ -1,15 +1,11 @@
 "use client";
 
 import type { ApiRequest, ApiResponse } from "./types";
-import { getApiKey } from "./storage";
 
 export async function callClaude(req: ApiRequest): Promise<ApiResponse> {
-  const key = getApiKey();
-  if (!key) throw new Error("No API key set. Add your Anthropic API key on the home screen.");
-
   const res = await fetch("/api/claude", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-anthropic-key": key },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
 

@@ -6,17 +6,51 @@ export type Turn = {
   content: string;
   kind?: "curriculum" | "question" | "answer" | "grade" | "note";
   score?: number;
+  topic?: string;
+  source?: { description: string; url?: string };
+  concept_tags?: string[];
   createdAt: number;
+};
+
+export type InterviewType = "coding" | "system_design" | "behavioral" | "domain";
+
+export type BankEntry = {
+  id: string;
+  content: string;
+  source?: { description: string; url?: string };
+  concept_tags?: string[];
+  schemaVersion?: number;
+  used: boolean;
+  usedAt?: number;
+};
+
+export type CheatSheetEntry = {
+  id: string;
+  topic: string;
+  concept: string;
+  when_to_use: string;
+  syntax: string;
+  language?: string;
+  gotcha?: string;
+  user_note?: string;
 };
 
 export type Session = {
   id: string;
   role: string;
   company: string;
+  languages?: string;
+  interviewTypes?: InterviewType[];
+  seniority?: string;
+  motivation?: string;
+  notes?: string;
   createdAt: number;
   updatedAt: number;
   turns: Turn[];
   scores: number[];
+  questionBanks?: Record<string, BankEntry[]>;
+  seenQuestions?: Record<string, string[]>;
+  cheatSheet?: CheatSheetEntry[];
 };
 
 export type ApiMessage = {
