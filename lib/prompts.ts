@@ -360,6 +360,83 @@ export function pairGradeMessages(
   ];
 }
 
+export function addCheatSheetEntryMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  conceptName: string,
+  curriculum: Curriculum,
+): ApiMessage[] {
+  const topicTitles = curriculum.items.map((it) => it.title).join(" / ");
+  return [
+    {
+      role: "user",
+      content:
+        `The candidate is preparing for a "${session.role}" role at ${session.company}` +
+        (session.languages ? ` (language: ${session.languages})` : "") +
+        `. Their curriculum topics are: ${topicTitles}.\n\n` +
+        `They want to add a cheat sheet entry for the concept "${conceptName}". Generate ONE entry as a JSON object (no prose outside it, no code fence) with this shape:\n` +
+        "{\n" +
+        '  "topic": "<best matching curriculum topic title from the list above, or \\"General\\" if no good fit>",\n' +
+        '  "concept": "<polished concept name; can be more specific than the input if helpful, e.g., \\"Grand Central Dispatch (GCD)\\">",\n' +
+        '  "when_to_use": "<1-2 sentences on WHEN to reach for this vs alternatives>",\n' +
+        '  "syntax": "<idiomatic code snippet, 3-12 lines, showing the API>",\n' +
+        '  "language": "<lowercase language hint matching the snippet, e.g., swift, python, scala, typescript>",\n' +
+        '  "gotcha": "<optional, the single most common mistake people make with this — omit field if there isn\'t a clear gotcha>"\n' +
+        "}",
+    },
+  ];
+}
+
+export function fillGotchaMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  entry: { topic: string; concept: string; when_to_use: string; syntax: string; language?: string },
+): ApiMessage[] {
+  return [
+    {
+      role: "user",
+      content:
+        `Context: cheat sheet entry for a "${session.role}" candidate at ${session.company}` +
+        (session.languages ? ` (${session.languages})` : "") +
+        `.\n\nTopic: ${entry.topic}\nConcept: ${entry.concept}\nWhen to use: ${entry.when_to_use}\nSyntax:\n\`\`\`${entry.language ?? ""}\n${entry.syntax}\n\`\`\`\n\n` +
+        `Return ONLY a JSON object with one field: { "gotcha": "<the single most common mistake people make with this concept — one sentence, concrete, no hedging>" }. If there is genuinely no notable gotcha, return { "gotcha": null }.`,
+    },
+  ];
+}
+
+export function parseGotcha(text: string): string | null {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[0]);
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.gotcha !== "string") return null;
+    const g = r.gotcha.trim();
+    return g.length > 0 ? g : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseSingleCheatSheetEntry(text: string): RawCheatSheetEntry | null {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[0]);
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const topic = typeof r.topic === "string" ? r.topic.trim() : "";
+    const concept = typeof r.concept === "string" ? r.concept.trim() : "";
+    const when_to_use = typeof r.when_to_use === "string" ? r.when_to_use.trim() : "";
+    const syntax = typeof r.syntax === "string" ? r.syntax : "";
+    if (!topic || !concept || !syntax) return null;
+    const language = typeof r.language === "string" ? r.language.trim().toLowerCase() : undefined;
+    const gotcha = typeof r.gotcha === "string" && r.gotcha.trim() ? r.gotcha.trim() : undefined;
+    return { topic, concept, when_to_use, syntax, language, gotcha };
+  } catch {
+    return null;
+  }
+}
+
 export function cheatSheetAskCoachMessages(
   session: Pick<Session, "role" | "company" | "languages">,
   entry: { concept: string; when_to_use: string; syntax: string; language?: string; topic: string },

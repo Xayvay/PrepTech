@@ -77,6 +77,10 @@ import {
   cheatSheetMessages,
   parseCheatSheet,
   cheatSheetAskCoachMessages,
+  addCheatSheetEntryMessages,
+  parseSingleCheatSheetEntry,
+  fillGotchaMessages,
+  parseGotcha,
   gradeMessages,
   parseGrade,
   parseCurriculum,
@@ -303,6 +307,59 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       setError(e instanceof Error ? e.message : "Failed to grade");
     } finally {
       setPairBusy(false);
+    }
+  }
+
+  async function addCheatSheetConcept(conceptName: string): Promise<boolean> {
+    if (!session || !conceptName.trim()) return false;
+    const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
+    const parsed = curriculumTurn ? parseCurriculum(curriculumTurn.content) : null;
+    if (!parsed) {
+      setError("Build the study plan first — the cheat sheet uses it for context.");
+      return false;
+    }
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: addCheatSheetEntryMessages(session, conceptName.trim(), parsed),
+        useWebSearch: false,
+      });
+      const raw = parseSingleCheatSheetEntry(res.text);
+      if (!raw) {
+        setError("Could not parse the new entry. Try a different phrasing.");
+        return false;
+      }
+      const newEntry: CheatSheetEntry = { ...raw, id: crypto.randomUUID() };
+      const existing = session.cheatSheet ?? [];
+      commit({ ...session, cheatSheet: [...existing, newEntry] });
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add concept");
+      return false;
+    }
+  }
+
+  async function fillGotchaForEntry(entry: CheatSheetEntry): Promise<boolean> {
+    if (!session) return false;
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: fillGotchaMessages(session, entry),
+        useWebSearch: false,
+      });
+      const gotcha = parseGotcha(res.text);
+      if (!gotcha) {
+        setError("Could not generate a gotcha for that entry. Try rebuilding the cheat sheet.");
+        return false;
+      }
+      const next = (session.cheatSheet ?? []).map((e) =>
+        e.id === entry.id ? { ...e, gotcha } : e,
+      );
+      commit({ ...session, cheatSheet: next });
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to fetch gotcha");
+      return false;
     }
   }
 
@@ -613,6 +670,8 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
           onRebuild={rebuildCheatSheet}
           onSaveNote={saveCheatSheetNote}
           onAskCoach={askCoachForEntry}
+          onAddConcept={addCheatSheetConcept}
+          onFillGotcha={fillGotchaForEntry}
         />
       </>
     );
@@ -789,6 +848,8 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         onRebuild={rebuildCheatSheet}
         onSaveNote={saveCheatSheetNote}
         onAskCoach={askCoachForEntry}
+        onAddConcept={addCheatSheetConcept}
+        onFillGotcha={fillGotchaForEntry}
       />
       </>
     );
@@ -1278,6 +1339,8 @@ function CheatSheetDrawer({
   onRebuild,
   onSaveNote,
   onAskCoach,
+  onAddConcept,
+  onFillGotcha,
 }: {
   open: boolean;
   loading: boolean;
@@ -1288,8 +1351,23 @@ function CheatSheetDrawer({
   onRebuild: () => void;
   onSaveNote: (entryId: string, note: string) => void;
   onAskCoach: (entry: CheatSheetEntry, question: string) => Promise<string>;
+  onAddConcept: (conceptName: string) => Promise<boolean>;
+  onFillGotcha: (entry: CheatSheetEntry) => Promise<boolean>;
 }) {
   const entryRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [addingConcept, setAddingConcept] = useState(false);
+
+  useEffect(() => {
+    if (filterConcept) setSearchQuery(filterConcept);
+  }, [filterConcept]);
+
+  useEffect(() => {
+    if (!open) {
+      setSearchQuery("");
+      setAddingConcept(false);
+    }
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -1341,14 +1419,24 @@ function CheatSheetDrawer({
 
   if (!open) return null;
 
+  const searchNorm = searchQuery.trim().toLowerCase();
+  const visibleEntries = entries
+    ? searchNorm.length > 0
+      ? entries.filter((e) => {
+          const haystack = `${e.concept} ${e.when_to_use} ${e.gotcha ?? ""} ${e.topic} ${e.user_note ?? ""}`.toLowerCase();
+          return haystack.includes(searchNorm);
+        })
+      : entries
+    : [];
+
   const grouped: Record<string, CheatSheetEntry[]> = {};
-  if (entries) {
-    for (const e of entries) {
-      grouped[e.topic] = grouped[e.topic] ?? [];
-      grouped[e.topic].push(e);
-    }
+  for (const e of visibleEntries) {
+    grouped[e.topic] = grouped[e.topic] ?? [];
+    grouped[e.topic].push(e);
   }
   const topics = Object.keys(grouped);
+  const showAddMissing =
+    searchNorm.length > 0 && visibleEntries.length === 0 && (entries?.length ?? 0) > 0;
   const filterNorm = filterTopic?.trim().toLowerCase();
   const orderedTopics = filterNorm
     ? [
@@ -1397,6 +1485,17 @@ function CheatSheetDrawer({
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
+          {!loading && entries && entries.length > 0 && (
+            <div className="mb-4">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search cheat sheet (e.g. 'gcd', 'actor', 'cancellation')…"
+                className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs outline-none focus:border-zinc-600"
+              />
+            </div>
+          )}
           {loading && (
             <div className="flex items-center gap-2 text-sm text-zinc-400">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-400" />
@@ -1406,7 +1505,26 @@ function CheatSheetDrawer({
           {!loading && entries && entries.length === 0 && (
             <div className="text-sm text-zinc-500">No entries — try regenerating.</div>
           )}
-          {!loading && entries && entries.length > 0 && (
+          {showAddMissing && (
+            <div className="mb-4 rounded-md border border-purple-900/50 bg-purple-950/30 p-3">
+              <div className="mb-2 text-sm text-zinc-300">
+                No cheat sheet entries match <span className="font-mono text-zinc-100">&quot;{searchQuery}&quot;</span>.
+              </div>
+              <button
+                disabled={addingConcept}
+                onClick={async () => {
+                  setAddingConcept(true);
+                  const ok = await onAddConcept(searchQuery.trim());
+                  setAddingConcept(false);
+                  if (ok) setSearchQuery("");
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md bg-purple-500 px-3 py-1.5 text-xs font-medium text-purple-950 hover:bg-purple-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {addingConcept ? "Adding…" : `+ Add "${searchQuery.trim()}" to your cheat sheet`}
+              </button>
+            </div>
+          )}
+          {!loading && entries && entries.length > 0 && visibleEntries.length > 0 && (
             <div className="space-y-6">
               {orderedTopics.map((topic) => {
                 const isFiltered = filterNorm && topic.trim().toLowerCase() === filterNorm;
@@ -1426,6 +1544,7 @@ function CheatSheetDrawer({
                           entry={e}
                           onSaveNote={onSaveNote}
                           onAskCoach={onAskCoach}
+                          onFillGotcha={onFillGotcha}
                           highlighted={e.id === matchedEntryId}
                           registerRef={(el) => entryRefs.current.set(e.id, el)}
                         />
@@ -1446,12 +1565,14 @@ function CheatSheetEntryView({
   entry,
   onSaveNote,
   onAskCoach,
+  onFillGotcha,
   highlighted,
   registerRef,
 }: {
   entry: CheatSheetEntry;
   onSaveNote: (entryId: string, note: string) => void;
   onAskCoach: (entry: CheatSheetEntry, question: string) => Promise<string>;
+  onFillGotcha: (entry: CheatSheetEntry) => Promise<boolean>;
   highlighted?: boolean;
   registerRef?: (el: HTMLDivElement | null) => void;
 }) {
@@ -1460,6 +1581,7 @@ function CheatSheetEntryView({
   const [askingCoach, setAskingCoach] = useState(false);
   const [coachQuestion, setCoachQuestion] = useState("");
   const [coachBusy, setCoachBusy] = useState(false);
+  const [fillingGotcha, setFillingGotcha] = useState(false);
 
   useEffect(() => {
     setDraftNote(entry.user_note ?? "");
@@ -1509,10 +1631,22 @@ function CheatSheetEntryView({
         <p className="mb-2 text-xs leading-relaxed text-zinc-300">{entry.when_to_use}</p>
       )}
       <CodeBlock code={entry.syntax} language={entry.language} />
-      {entry.gotcha && (
+      {entry.gotcha ? (
         <p className="mt-2 text-[11px] italic leading-relaxed text-amber-300/90">
           <span className="font-semibold not-italic text-amber-400">Gotcha:</span> {entry.gotcha}
         </p>
+      ) : (
+        <button
+          disabled={fillingGotcha}
+          onClick={async () => {
+            setFillingGotcha(true);
+            await onFillGotcha(entry);
+            setFillingGotcha(false);
+          }}
+          className="mt-2 text-[11px] text-amber-400/80 hover:text-amber-300 disabled:opacity-50"
+        >
+          {fillingGotcha ? "fetching gotcha…" : "+ No gotcha here — get one from the coach"}
+        </button>
       )}
 
       {!editing && entry.user_note && (
