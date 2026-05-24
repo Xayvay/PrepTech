@@ -76,10 +76,15 @@ import {
   parseQuestionBank,
   cheatSheetMessages,
   parseCheatSheet,
+  cheatSheetAskCoachMessages,
   gradeMessages,
   parseGrade,
   parseCurriculum,
   isCodingTopic,
+  isPairProgrammingTopic,
+  pairKickoffMessages,
+  pairTurnMessages,
+  pairGradeMessages,
   BANK_SCHEMA_VERSION,
   type Curriculum,
   type CurriculumItem,
@@ -100,7 +105,9 @@ type FocusedTopic = { title: string; isCoding: boolean };
 
 type Phase = "idle" | "loading-curriculum" | "ready-to-ask" | "loading-question" | "answering" | "grading";
 
-type Mode = "transcript" | "drilling";
+type Mode = "transcript" | "drilling" | "pair";
+
+type PairMessage = { id: string; role: "user" | "assistant"; content: string };
 
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -116,6 +123,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [cheatSheetConcept, setCheatSheetConcept] = useState<string | null>(null);
   const [cheatSheetLoading, setCheatSheetLoading] = useState(false);
   const [wasSpoken, setWasSpoken] = useState(false);
+  const [pairTurns, setPairTurns] = useState<PairMessage[]>([]);
+  const [pairTopic, setPairTopic] = useState<string | null>(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairInput, setPairInput] = useState("");
   const autoBuildFired = useRef(false);
 
   useEffect(() => {
@@ -207,6 +218,104 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setMode("transcript");
   }
 
+  async function startPairProgramming(item: CurriculumItem) {
+    if (!session) return;
+    setPairTopic(item.title);
+    setPairTurns([]);
+    setPairInput("");
+    setMode("pair");
+    setPairBusy(true);
+    setError(null);
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: pairKickoffMessages(session, item.title),
+        useWebSearch: false,
+      });
+      setPairTurns([{ id: crypto.randomUUID(), role: "assistant", content: res.text.trim() }]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to start pair session");
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
+  async function sendPairMessage() {
+    if (!session || !pairInput.trim() || !pairTopic) return;
+    const userMsg: PairMessage = { id: crypto.randomUUID(), role: "user", content: pairInput.trim() };
+    const nextTurns = [...pairTurns, userMsg];
+    setPairTurns(nextTurns);
+    setPairInput("");
+    setPairBusy(true);
+    setError(null);
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: pairTurnMessages(
+          session,
+          nextTurns.map((t) => ({ role: t.role, content: t.content })),
+        ),
+        useWebSearch: false,
+      });
+      setPairTurns([
+        ...nextTurns,
+        { id: crypto.randomUUID(), role: "assistant", content: res.text.trim() },
+      ]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to send");
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
+  async function wrapUpPairAndGrade() {
+    if (!session || !pairTopic || pairTurns.length < 2) return;
+    setPairBusy(true);
+    setError(null);
+    try {
+      const res = await callClaude({
+        system: sys,
+        messages: pairGradeMessages(
+          session,
+          pairTurns.map((t) => ({ role: t.role, content: t.content })),
+          pairTopic,
+        ),
+        useWebSearch: true,
+      });
+      const grade = parseGrade(res.text);
+      const transcriptText =
+        `[PAIR SESSION: ${pairTopic}]\n\n` +
+        pairTurns
+          .map((t) => `${t.role === "assistant" ? "Interviewer" : "Candidate"}: ${t.content}`)
+          .join("\n\n");
+      const transcriptTurn = newTurn("user", transcriptText, "answer", undefined, pairTopic);
+      const gradeTurn = newTurn("assistant", res.text, "grade", grade?.score, pairTopic);
+      const nextScores = grade ? [...session.scores, grade.score] : session.scores;
+      commit({
+        ...session,
+        turns: [...session.turns, transcriptTurn, gradeTurn],
+        scores: nextScores,
+      });
+      setMode("transcript");
+      setPairTurns([]);
+      setPairTopic(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to grade");
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
+  async function askCoachForEntry(entry: CheatSheetEntry, question: string): Promise<string> {
+    if (!session) return "";
+    const res = await callClaude({
+      system: sys,
+      messages: cheatSheetAskCoachMessages(session, entry, question),
+      useWebSearch: false,
+    });
+    return res.text.trim();
+  }
+
   function nextTopicAndDrill() {
     if (!session) return;
     const curriculumTurn = session.turns.find((t) => t.kind === "curriculum");
@@ -239,6 +348,12 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setError(null);
     setWasSpoken(false);
     setPhase("answering");
+  }
+
+  function discardQuestion(questionTurn: Turn) {
+    if (!session) return;
+    const next = session.turns.filter((t) => t.id !== questionTurn.id);
+    commit({ ...session, turns: next });
   }
 
   function redoQuestion(questionTurn: Turn) {
@@ -388,6 +503,120 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const codingLanguage = focusedTopic?.isCoding
     ? session.languages?.split(",")[0]?.trim() || "code"
     : undefined;
+
+  if (mode === "pair") {
+    return (
+      <>
+        <main className="mx-auto flex min-h-screen max-w-3xl flex-col px-6">
+          <div className="sticky top-0 z-20 -mx-6 bg-zinc-950/95 backdrop-blur">
+            <header className="flex items-center justify-between gap-3 border-b border-zinc-800 px-6 py-3">
+              <button
+                onClick={() => {
+                  setMode("transcript");
+                  setPairTurns([]);
+                  setPairTopic(null);
+                }}
+                className="text-xs text-zinc-400 hover:text-zinc-200"
+              >
+                ← Back to study plan
+              </button>
+              <div className="min-w-0 flex-1 truncate text-center text-sm text-zinc-200">
+                Pair session: {pairTopic ?? "—"}
+                <span className="ml-2 rounded bg-purple-900/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-purple-200">
+                  pair
+                </span>
+              </div>
+              <button
+                onClick={() => openCheatSheet(pairTopic ?? undefined)}
+                className="rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+                title="Open cheat sheet"
+              >
+                📖
+              </button>
+            </header>
+          </div>
+
+          <div className="flex-1 space-y-3 py-4">
+            {error && (
+              <div className="rounded-md border border-red-900 bg-red-950/60 px-3 py-2 text-sm text-red-200">
+                {error}
+              </div>
+            )}
+            {pairTurns.length === 0 && pairBusy && (
+              <PhaseStatus label="Starting the pair-programming session…" />
+            )}
+            {pairTurns.map((t) => (
+              <div
+                key={t.id}
+                className={`flex ${t.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-lg border px-3 py-2 text-sm leading-relaxed ${
+                    t.role === "user"
+                      ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-100"
+                      : "border-purple-900/60 bg-purple-950/40 text-zinc-100"
+                  }`}
+                >
+                  <div className="mb-1 text-[10px] uppercase tracking-wide opacity-70">
+                    {t.role === "user" ? "you" : "interviewer"}
+                  </div>
+                  <div className="whitespace-pre-wrap">{t.content}</div>
+                </div>
+              </div>
+            ))}
+            {pairBusy && pairTurns.length > 0 && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-lg border border-purple-900/60 bg-purple-950/40 px-3 py-2 text-sm">
+                  <PhaseStatus label="Thinking…" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="sticky bottom-0 -mx-6 border-t border-zinc-800 bg-zinc-950/95 px-6 py-4 backdrop-blur">
+            <AnswerInput
+              value={pairInput}
+              onChange={setPairInput}
+              onSubmit={sendPairMessage}
+              codingLanguage={undefined}
+              onSpeechCaptured={() => setWasSpoken(true)}
+            />
+            <div className="mt-2 flex flex-wrap gap-2 text-sm">
+              <button
+                onClick={wrapUpPairAndGrade}
+                disabled={pairBusy || pairTurns.length < 2}
+                className="flex-1 rounded-md bg-emerald-500 px-3 py-1.5 font-medium text-emerald-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                title="End the session and get a graded review"
+              >
+                Wrap up & grade →
+              </button>
+              <button
+                onClick={() => {
+                  setMode("transcript");
+                  setPairTurns([]);
+                  setPairTopic(null);
+                }}
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-300 hover:bg-zinc-800"
+              >
+                Discard & back
+              </button>
+            </div>
+          </div>
+        </main>
+        <CheatSheetDrawer
+          open={cheatSheetOpen}
+          loading={cheatSheetLoading}
+          entries={session.cheatSheet}
+          filterTopic={cheatSheetFilter}
+          filterConcept={cheatSheetConcept}
+          onClose={() => setCheatSheetOpen(false)}
+          onRebuild={rebuildCheatSheet}
+          onSaveNote={saveCheatSheetNote}
+          onAskCoach={askCoachForEntry}
+        />
+      </>
+    );
+  }
 
   if (mode === "drilling") {
     const lastQuestion = [...session.turns].reverse().find((t) => t.kind === "question");
@@ -559,6 +788,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         onClose={() => setCheatSheetOpen(false)}
         onRebuild={rebuildCheatSheet}
         onSaveNote={saveCheatSheetNote}
+        onAskCoach={askCoachForEntry}
       />
       </>
     );
@@ -608,7 +838,9 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
             turn={t}
             session={session}
             onDrillTopic={drillTopic}
+            onPairProgram={startPairProgramming}
             onRedoQuestion={redoQuestion}
+            onDiscardQuestion={discardQuestion}
           />
         ))}
       </div>
@@ -793,12 +1025,16 @@ function TurnView({
   turn,
   session,
   onDrillTopic,
+  onPairProgram,
   onRedoQuestion,
+  onDiscardQuestion,
 }: {
   turn: Turn;
   session: Session;
   onDrillTopic: (item: CurriculumItem) => void;
+  onPairProgram: (item: CurriculumItem) => void;
   onRedoQuestion: (turn: Turn) => void;
+  onDiscardQuestion: (turn: Turn) => void;
 }) {
   const label = turn.kind ?? (turn.role === "user" ? "you" : "assistant");
   const tone =
@@ -818,7 +1054,12 @@ function TurnView({
       return (
         <div className={`rounded-lg border ${tone} p-4`}>
           <div className="mb-3 text-xs uppercase tracking-wide text-zinc-500">study plan</div>
-          <CurriculumView curriculum={parsed} session={session} onDrillTopic={onDrillTopic} />
+          <CurriculumView
+            curriculum={parsed}
+            session={session}
+            onDrillTopic={onDrillTopic}
+            onPairProgram={onPairProgram}
+          />
         </div>
       );
     }
@@ -850,21 +1091,33 @@ function TurnView({
     const idx = session.turns.findIndex((t) => t.id === turn.id);
     const subsequent = idx === -1 ? [] : session.turns.slice(idx + 1);
     const hasAnswerOrGrade = subsequent.some((t) => t.kind === "answer" || t.kind === "grade");
-    const isLatestQuestion = !subsequent.some((t) => t.kind === "question");
-    const willResume = !hasAnswerOrGrade && isLatestQuestion;
+    const unanswered = !hasAnswerOrGrade;
     return (
       <div className={`rounded-lg border ${tone} p-4`}>
         <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="text-xs uppercase tracking-wide text-amber-400">question</span>
-          {turn.topic && (
-            <button
-              onClick={() => onRedoQuestion(turn)}
-              className="rounded-md border border-amber-700/60 bg-amber-950/60 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-950/80"
-              title={willResume ? "Continue this unfinished question" : "Drill this question again"}
-            >
-              {willResume ? "Continue this question →" : "Drill again →"}
-            </button>
-          )}
+          <span className="text-xs uppercase tracking-wide text-amber-400">
+            question{unanswered ? " · unanswered" : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            {turn.topic && (
+              <button
+                onClick={() => onRedoQuestion(turn)}
+                className="rounded-md border border-amber-700/60 bg-amber-950/60 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-950/80"
+                title={unanswered ? "Continue this unfinished question" : "Drill this question again"}
+              >
+                {unanswered ? "Continue this question →" : "Drill again →"}
+              </button>
+            )}
+            {unanswered && (
+              <button
+                onClick={() => onDiscardQuestion(turn)}
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                title="Discard this unanswered question from history"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
         <div className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">{turn.content}</div>
         {turn.source && (
@@ -900,16 +1153,19 @@ function CurriculumView({
   curriculum,
   session,
   onDrillTopic,
+  onPairProgram,
 }: {
   curriculum: Curriculum;
   session: Session;
   onDrillTopic: (item: CurriculumItem) => void;
+  onPairProgram: (item: CurriculumItem) => void;
 }) {
   return (
     <div className="space-y-2">
       {curriculum.items.map((item) => {
         const mastery = computeMastery(session, item.title);
         const coding = isCodingTopic(item);
+        const pairable = isPairProgrammingTopic(item);
         return (
         <details
           key={item.number}
@@ -951,6 +1207,14 @@ function CurriculumView({
               >
                 Drill this topic →
               </button>
+              {pairable && (
+                <button
+                  onClick={() => onPairProgram(item)}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-purple-500 px-3 py-1.5 text-xs font-medium text-purple-950 hover:bg-purple-400"
+                >
+                  Pair-program this →
+                </button>
+              )}
               {coding && (
                 <a
                   href={leetcodeUrl(item.title)}
@@ -1013,6 +1277,7 @@ function CheatSheetDrawer({
   onClose,
   onRebuild,
   onSaveNote,
+  onAskCoach,
 }: {
   open: boolean;
   loading: boolean;
@@ -1022,6 +1287,7 @@ function CheatSheetDrawer({
   onClose: () => void;
   onRebuild: () => void;
   onSaveNote: (entryId: string, note: string) => void;
+  onAskCoach: (entry: CheatSheetEntry, question: string) => Promise<string>;
 }) {
   const entryRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
 
@@ -1159,6 +1425,7 @@ function CheatSheetDrawer({
                           key={e.id}
                           entry={e}
                           onSaveNote={onSaveNote}
+                          onAskCoach={onAskCoach}
                           highlighted={e.id === matchedEntryId}
                           registerRef={(el) => entryRefs.current.set(e.id, el)}
                         />
@@ -1178,16 +1445,21 @@ function CheatSheetDrawer({
 function CheatSheetEntryView({
   entry,
   onSaveNote,
+  onAskCoach,
   highlighted,
   registerRef,
 }: {
   entry: CheatSheetEntry;
   onSaveNote: (entryId: string, note: string) => void;
+  onAskCoach: (entry: CheatSheetEntry, question: string) => Promise<string>;
   highlighted?: boolean;
   registerRef?: (el: HTMLDivElement | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draftNote, setDraftNote] = useState(entry.user_note ?? "");
+  const [askingCoach, setAskingCoach] = useState(false);
+  const [coachQuestion, setCoachQuestion] = useState("");
+  const [coachBusy, setCoachBusy] = useState(false);
 
   useEffect(() => {
     setDraftNote(entry.user_note ?? "");
@@ -1196,6 +1468,24 @@ function CheatSheetEntryView({
   function commitNote() {
     onSaveNote(entry.id, draftNote);
     setEditing(false);
+  }
+
+  async function submitCoachQuestion() {
+    if (!coachQuestion.trim()) return;
+    setCoachBusy(true);
+    try {
+      const answer = await onAskCoach(entry, coachQuestion.trim());
+      const prior = entry.user_note ?? "";
+      const block = `**Q:** ${coachQuestion.trim()}\n\n${answer}`;
+      const merged = prior.length > 0 ? `${prior}\n\n---\n\n${block}` : block;
+      onSaveNote(entry.id, merged);
+      setCoachQuestion("");
+      setAskingCoach(false);
+    } catch {
+      // error surfaced elsewhere
+    } finally {
+      setCoachBusy(false);
+    }
   }
 
   return (
@@ -1240,13 +1530,57 @@ function CheatSheetEntryView({
         </div>
       )}
 
-      {!editing && !entry.user_note && (
-        <button
-          onClick={() => setEditing(true)}
-          className="mt-2 text-[11px] text-zinc-500 hover:text-zinc-300"
-        >
-          + Add your note
-        </button>
+      {!editing && !askingCoach && (
+        <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+          <button
+            onClick={() => setEditing(true)}
+            className="text-zinc-500 hover:text-zinc-300"
+          >
+            + {entry.user_note ? "Edit your note" : "Add your note"}
+          </button>
+          <button
+            onClick={() => setAskingCoach(true)}
+            className="text-purple-400 hover:text-purple-300"
+          >
+            + Ask the coach
+          </button>
+        </div>
+      )}
+
+      {askingCoach && (
+        <div className="mt-2 rounded-md border border-purple-900/50 bg-purple-950/30 p-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-purple-400">
+            Ask the coach about {entry.concept}
+          </div>
+          <textarea
+            value={coachQuestion}
+            onChange={(e) => setCoachQuestion(e.target.value)}
+            rows={2}
+            autoFocus
+            disabled={coachBusy}
+            placeholder="e.g. when would I pick this over async/await? what about cancellation?"
+            className="w-full rounded border border-purple-900/50 bg-zinc-950 px-2 py-1 text-[11px] leading-relaxed text-zinc-200 outline-none focus:border-purple-500 disabled:opacity-50"
+          />
+          <div className="mt-1 flex justify-end gap-2 text-[10px]">
+            <button
+              disabled={coachBusy}
+              onClick={() => {
+                setAskingCoach(false);
+                setCoachQuestion("");
+              }}
+              className="text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+            >
+              cancel
+            </button>
+            <button
+              disabled={coachBusy || !coachQuestion.trim()}
+              onClick={submitCoachQuestion}
+              className="text-purple-300 hover:text-purple-200 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {coachBusy ? "asking…" : "ask"}
+            </button>
+          </div>
+        </div>
       )}
 
       {editing && (

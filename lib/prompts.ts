@@ -30,6 +30,7 @@ export function systemPrompt(session: Pick<Session, "role" | "company" | "langua
     ...(motivationBlock ? [motivationBlock] : []),
     "Voice: tough but on their side. Honest about gaps without being cold. Credit real strengths so they know you're not flattering. When something is weak, name it specifically — vague feedback feels like a brush-off and it is. Avoid generic 'study more' advice. Treat the candidate like an adult who can hear the truth.",
     "Use the web_search tool to ground your prep in current, real information: the company's recent news, engineering blog, products, tech stack, leadership, and reported interview themes for this role. When recommending resources in grades, search for a real, current article/video/talk and include the actual URL. Never invent links.",
+    "When building a curriculum, ALSO search for the specific interview-round FORMATS this company uses for this role — pair programming, take-home, code review, system design, behavioral panel, live coding session, etc. — and their distinctive setup (duration, tooling, language constraints, what they grade). When a round has a distinctive format, dedicate a curriculum item specifically to preparing for it and name the format in the item title (e.g., 'Pair Programming (75 min, VS Code Live Share, Swift)' rather than just 'Coding'). The candidate should know what they're walking into.",
     "Be concrete and specific to this role+company. Avoid generic advice. Prefer evidence from real sources over assumptions.",
     "When asked to ask a question, ask exactly one focused question — technical, behavioral, or role-specific — that someone interviewing for this role at this company might realistically face. Do not answer it yourself. Phrase questions as the CONCRETE SCENARIO an interviewer would actually present — make the candidate identify the underlying concept themselves. Do NOT label the concept in the question. Example for a threading topic: ask 'You have a network call returning user data, and you need to update a UI label with it — walk me through how you'd do this without crashing' rather than 'How do you handle multithreading in Swift?' The only exception is when the topic itself is an explicit knowledge check (e.g., a 'fundamentals' or 'definitions' topic), in which case a direct question is appropriate.",
     [
@@ -261,6 +262,116 @@ const CODING_KEYWORDS = [
 export function isCodingTopic(item: { title: string; body: string }): boolean {
   const haystack = `${item.title} ${item.body}`.toLowerCase();
   return CODING_KEYWORDS.some((k) => haystack.includes(k));
+}
+
+const PAIR_PROGRAMMING_KEYWORDS = [
+  "pair programming",
+  "pair-programming",
+  "pair-coding",
+  "pair coding",
+  "live coding",
+  "live session",
+  "live share",
+  "vs code",
+  "vscode",
+  "shared codebase",
+  "code together",
+  "collaborative coding",
+];
+
+export function isPairProgrammingTopic(item: { title: string; body: string }): boolean {
+  const haystack = `${item.title} ${item.body}`.toLowerCase();
+  return PAIR_PROGRAMMING_KEYWORDS.some((k) => haystack.includes(k));
+}
+
+export function pairKickoffMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  topicTitle: string,
+): ApiMessage[] {
+  return [
+    {
+      role: "user",
+      content:
+        `You are now playing the role of an interviewer running a PAIR-PROGRAMMING round for a "${session.role}" position at ${session.company}.` +
+        (session.languages ? ` Primary language: ${session.languages}.` : "") +
+        `\n\nTopic: ${topicTitle}\n\n` +
+        `Open the session as a real interviewer would: a short friendly greeting (1 sentence), then present a SPECIFIC, REALISTIC pair-programming task the candidate would actually face — concrete scenario, NOT a labeled concept question. Describe the existing codebase context briefly (what's there, what needs to change), give just enough constraints, and ask the candidate to start. Do NOT solve it yourself. Do NOT pre-label what concept it tests. Make them think.\n\n` +
+        `Length: under 200 words total. Plain prose, no code blocks unless the codebase context requires showing 2-3 lines of skeleton. End with an open prompt like "Where would you start?" or "What questions do you have before you dive in?"`,
+    },
+  ];
+}
+
+export function pairTurnMessages(
+  session: Session,
+  pairTurnsHistory: { role: "user" | "assistant"; content: string }[],
+): ApiMessage[] {
+  return [
+    ...pairTurnsHistory,
+    {
+      role: "user" as const,
+      content:
+        "Continue as the pair-programming interviewer. Respond to my last message naturally — like a senior engineer pairing with me would. " +
+        "Choose one of: ask a clarifying question, push back on a wrong assumption, suggest a direction (without giving the solution), or react to my code/idea. " +
+        "If I'm stuck, give a small nudge — not the answer. If I'm wrong, say so directly but constructively. If I'm on track, confirm and let me keep going. " +
+        "Keep it to 1-3 sentences. NEVER write the solution code for me. Do not break character. Plain prose response.",
+    },
+  ];
+}
+
+export function pairGradeMessages(
+  session: Session,
+  pairTurnsHistory: { role: "user" | "assistant"; content: string }[],
+  topicTitle: string,
+): ApiMessage[] {
+  const motivationLine = session.motivation
+    ? `The candidate's stated motivation: "${session.motivation}"`
+    : "";
+  return [
+    ...pairTurnsHistory,
+    {
+      role: "user" as const,
+      content: [
+        `The pair-programming session is now ending. Grade the candidate on the entire conversation above for the topic "${topicTitle}".`,
+        motivationLine,
+        "",
+        "Return ONLY a JSON object with this shape (no prose outside it):",
+        "{",
+        '  "score": <integer 0-10 — overall pair-programming performance>,',
+        '  "strengths": ["1-2 specific things they did well — clarifying questions, structured thinking, accepting feedback, reading code, etc."],',
+        '  "gaps": ["1-3 specific things they need to work on — fixated on wrong path, didn\'t ask enough questions, didn\'t talk through reasoning, got defensive on pushback, etc."],',
+        '  "improvements": [',
+        '    { "skill": "<specific pair-programming skill>", "how": "<2-3 sentences, actionable>", "resource": { "title": "<real title>", "url": "<real searched URL>" } }',
+        '  ],',
+        '  "follow_up": "<one sharper question that targets the biggest gap from this session>",',
+        '  "nudge": "<one sentence tying the result to what the candidate said landing this role would change for them. Skip if no motivation was provided.>",',
+        '  "communication": { "score": <0-10>, "notes": "<how they communicated during pairing — clarifying questions, signposting, accepting feedback, talking through reasoning>" }',
+        "}",
+        "",
+        "Use web_search if you need to find a real resource for an improvement.",
+        "Score generously on willingness to think aloud and accept pushback; score harshly on staying silent, not asking clarifications, or getting defensive.",
+      ]
+        .filter((s) => s !== "")
+        .join("\n"),
+    },
+  ];
+}
+
+export function cheatSheetAskCoachMessages(
+  session: Pick<Session, "role" | "company" | "languages">,
+  entry: { concept: string; when_to_use: string; syntax: string; language?: string; topic: string },
+  question: string,
+): ApiMessage[] {
+  return [
+    {
+      role: "user",
+      content:
+        `Cheat sheet context for a "${session.role}" candidate at ${session.company}` +
+        (session.languages ? ` (language: ${session.languages})` : "") +
+        `:\n\nTopic: ${entry.topic}\nConcept: ${entry.concept}\nWhen to use: ${entry.when_to_use}\nSyntax:\n\`\`\`${entry.language ?? ""}\n${entry.syntax}\n\`\`\`\n\n` +
+        `The candidate's question: "${question}"\n\n` +
+        `Answer directly, focused, and grounded in the concept above. 2-4 short paragraphs max. Include a code snippet when it helps. Be concrete. If the question is about a tradeoff vs another approach, name both and say when to reach for each. Do not pad. Plain text or markdown — no JSON.`,
+    },
+  ];
 }
 
 export function gradeMessages(
